@@ -229,4 +229,5 @@ if (existsSync(adminDist)) {
 app.get('/api/health', async () => ({ ok: true }))
 
 await seedBrand(app.log)
-await app.listen({ port: PORT, host: '0.0.0.0' })
+// Boucle locale par défaut : en production seul le reverse proxy (Apache) doit joindre l'app.
+await app.listen({ port: PORT, host: process.env.EINK_HOST || '127.0.0.1' })
