@@ -15,6 +15,10 @@ class AutoEPDDisplay:
         self.frame_buf = Image.new('L', (self.width, self.height), 255)
         self.epd = _Epd()
 
+    def clear(self):
+        with open(os.environ['EINK_FAKE_LOG'], 'a') as f:
+            f.write(f"clear t={time.time():.3f}\n")
+
     def draw_full(self, mode):
         px = self.frame_buf.load()
         with open(os.environ['EINK_FAKE_LOG'], 'a') as f:

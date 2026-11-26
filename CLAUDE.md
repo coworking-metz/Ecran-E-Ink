@@ -62,6 +62,8 @@ Pi (Bearer = token du device) : `GET /api/device/current` → `{hash, image_url,
 - Dates en ISO UTC en base, saisies en heure locale dans le dashboard (`admin/src/dates.js`) ; la fin est exclusive.
 - Aucun slide actif : le **slide de repli** des options (`fallback_creation_id`), sinon l'écran garde sa dernière image.
 - L'ancien modèle (une création par écran, `devices.creation_id`) est migré au démarrage en premier slide ; la colonne n'est plus utilisée.
+- **Afficher ce slide maintenant** (`POST /api/slides/:id/show`, 409 si le slide n'est pas actif) : on décale la **phase** de la rotation de l'écran (`devices.phase_offset_ms`, `offsetToShow`) pour que ce slide commence à l'instant T ; la rotation continue ensuite avec les suivants dans l'ordre (pas une surcharge temporaire).
+- **Forcer le rafraîchissement** (`POST /api/devices/:id/refresh`) : compteur `refresh_nonce` ; le Pi qui voit un nouveau compteur **efface puis redessine** l'écran (rémanences), même image, et confirme avec `?nonce=` (`refreshed_nonce` → `refresh_pending` dans le dashboard). Au premier passage le Pi adopte le compteur sans rien forcer.
 
 ### Dashboard
 Pages : Créations (créations + templates, aperçus), Éditeur, Écrans (token, playlist, dernier passage), Options (durée par défaut, slide de repli).

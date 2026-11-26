@@ -15,7 +15,9 @@ const admin = { Authorization: 'Bearer pw' }
 const api = (method, path, body) => fetch(srv.base + path, { method, headers: { ...admin, ...(body ? { 'Content-Type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined })
 const json = async (...a) => (await api(...a)).json()
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-const draws = () => (existsSync(logFile) ? readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean) : [])
+const lines = () => (existsSync(logFile) ? readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean) : [])
+const draws = () => lines().filter((l) => l.startsWith('draw'))
+const clears = () => lines().filter((l) => l.startsWith('clear'))
 const centre = (line) => Number(/centre=(\d+)/.exec(line)[1])
 const at = (line) => Number(/t=([\d.]+)/.exec(line)[1])
 async function until(cond, ms, what) {
@@ -85,6 +87,16 @@ test('le client suit le dashboard en direct, regroupe les modifications rapproch
   await until(() => draws().length === 5, 8000, 'application des marges')
   assert.match(draws()[4], /coin=0/)
   assert.equal(centre(draws()[4]), 30)
+
+  // Rafraîchissement forcé depuis le dashboard : l'écran est effacé puis redessiné, avec la MÊME image, et le Pi confirme.
+  assert.equal(clears().length, 0, 'aucun effacement tant que rien n’est forcé (le premier passage adopte le compteur)')
+  await api('POST', `/api/devices/${dev.id}/refresh`)
+  await until(() => draws().length === 6, 8000, 'rafraîchissement forcé')
+  assert.equal(clears().length, 1, 'écran effacé avant de redessiner')
+  assert.equal(centre(draws()[5]), 30, 'même image qu’avant')
+  assert.match(draws()[5], /coin=0/, 'marges toujours appliquées')
+  for (let i = 0; i < 50; i++) { if (!(await json('GET', '/api/devices')).find((d) => d.id === dev.id).refresh_pending) break; await sleep(100) }
+  assert.equal((await json('GET', '/api/devices')).find((d) => d.id === dev.id).refresh_pending, false, 'le Pi a confirmé')
 
   // Le dashboard voit ce que l'écran affiche, et le voit en ligne.
   const listed = (await json('GET', '/api/devices')).find((d) => d.id === dev.id)

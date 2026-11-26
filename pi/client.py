@@ -61,8 +61,9 @@ def http_get(cfg, path, timeout=30):
         return r.read()
 
 
-def show(cfg, img):
-    """Envoie l'image au contrôleur IT8951 (GC16 : 16 gris, avec flash) puis le met en veille."""
+def show(cfg, img, clear=False):
+    """Envoie l'image au contrôleur IT8951 (GC16 : 16 gris, avec flash) puis le met en veille.
+    clear : efface d'abord l'écran en blanc (rafraîchissement forcé : élimine les rémanences)."""
     from IT8951.constants import DisplayModes
     from IT8951.display import AutoEPDDisplay
 
@@ -73,6 +74,8 @@ def show(cfg, img):
         if img.size != size:
             log.warning('image %s != écran %s : ajustée avec marges blanches', img.size, size)
             img = ImageOps.pad(img, size, color=255)
+        if clear:
+            display.clear()
         display.frame_buf.paste(img)
         t0 = time.time()
         display.draw_full(DisplayModes.GC16)
@@ -86,9 +89,11 @@ def show(cfg, img):
 def fetch_current(cfg, version=None, wait=0):
     """Interroge /api/device/current ; avec `version` et `wait`, le serveur retient la réponse jusqu'à un changement."""
     q = {}
-    shown = load_json(STATE, {}).get('hash')
-    if shown:
-        q['shown'] = shown  # ce que l'écran affiche : visible dans le dashboard
+    state = load_json(STATE, {})
+    if state.get('hash'):
+        q['shown'] = state['hash']  # ce que l'écran affiche : visible dans le dashboard
+    if state.get('refresh_nonce') is not None:
+        q['nonce'] = state['refresh_nonce']  # dernier « rafraîchissement forcé » pris en compte
     if version and wait:
         q.update(wait=wait, v=version)
     path = '/api/device/current' + ('?' + urllib.parse.urlencode(q) if q else '')
@@ -100,27 +105,50 @@ def fetch_current(cfg, version=None, wait=0):
         in_wait = False
 
 
+def needs_draw(cur):
+    """(à dessiner ?, rafraîchissement forcé ?) d'après la réponse du serveur et l'état mémorisé."""
+    state = load_json(STATE, {})
+    nonce = cur.get('refresh_nonce')
+    if nonce is not None and state.get('refresh_nonce') is None:
+        save_state(refresh_nonce=nonce)  # premier passage : on adopte le compteur sans rien forcer
+        state['refresh_nonce'] = nonce
+    forced = nonce is not None and nonce != state.get('refresh_nonce')
+    h = cur.get('hash')
+    if not h:
+        if forced:
+            log.info('rafraîchissement demandé, mais aucune image à afficher')
+            save_state(refresh_nonce=nonce)
+        return False, False
+    return (forced or h != state.get('hash')), forced
+
+
 def update_display(cfg, cur):
-    """Affiche l'image annoncée si elle diffère de celle déjà à l'écran. Renvoie la réponse la plus récente."""
+    """Affiche l'image annoncée si elle diffère de celle déjà à l'écran, ou si un rafraîchissement est forcé
+    (alors : écran effacé puis redessiné, même image). Renvoie la réponse la plus récente."""
     global last_draw
-    h = cur.get('hash')
-    if not h or h == load_json(STATE, {}).get('hash'):
+    draw, forced = needs_draw(cur)
+    if not draw:
         return cur
-    # Plusieurs modifications peuvent se suivre : on laisse se poser, on relit, puis on dessine une seule fois.
-    time.sleep(cfg.get('settle_seconds', SETTLE))
-    cur = fetch_current(cfg)
-    h = cur.get('hash')
-    if not h or h == load_json(STATE, {}).get('hash'):
-        return cur
+    if not forced:
+        # Plusieurs modifications peuvent se suivre : on laisse se poser, on relit, puis on dessine une seule fois.
+        time.sleep(cfg.get('settle_seconds', SETTLE))
+        cur = fetch_current(cfg)
+        draw, forced = needs_draw(cur)
+        if not draw:
+            return cur
     gap = cfg.get('min_redraw_gap_seconds', MIN_REDRAW_GAP) - (time.time() - last_draw)
     if gap > 0:
         time.sleep(gap)
-    log.info('nouvelle image %s (slide %s sur %s actifs) : téléchargement', h[:8], cur.get('slide_id'), cur.get('slide_count'))
+    h = cur['hash']
+    log.info('%s %s (slide %s sur %s actifs) : téléchargement', 'rafraîchissement forcé de' if forced else 'nouvelle image', h[:8], cur.get('slide_id'), cur.get('slide_count'))
     img = Image.open(io.BytesIO(http_get(cfg, cur['image_url'], timeout=60)))
     img.load()
-    show(cfg, img)
+    show(cfg, img, clear=forced)
     last_draw = time.time()
-    save_state(hash=h, shown_at=int(time.time()))
+    fields = {'hash': h, 'shown_at': int(time.time())}
+    if cur.get('refresh_nonce') is not None:
+        fields['refresh_nonce'] = cur['refresh_nonce']
+    save_state(**fields)
     return cur
 
 

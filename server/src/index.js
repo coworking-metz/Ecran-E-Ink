@@ -8,7 +8,7 @@ import { readFile, writeFile, unlink, copyFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { db, CREATIONS_DIR, ASSETS_DIR, getSettings, setSetting } from './db.js'
-import { schedule, nextCheckSeconds, MIN_SLIDE_SECONDS } from './playlist.js'
+import { schedule, nextCheckSeconds, offsetToShow, MIN_SLIDE_SECONDS } from './playlist.js'
 import { notify, waitForChange, versionOf } from './hub.js'
 import { parseMargins, canvasSize, finalHash, composeFinal, calibrationStart, calibrationStop, calibrationRemainingMs, calibrationHash, calibrationImage } from './screen.js'
 import { seedBrand } from './brand.js'
@@ -182,7 +182,7 @@ const slidesOf = (deviceId) =>
 function resolveForDevice(device, nowMs = Date.now()) {
   const settings = getSettings()
   const items = slidesOf(device.id)
-  const r = schedule(items, nowMs, settings.default_slide_seconds)
+  const r = schedule(items, nowMs, settings.default_slide_seconds, device.phase_offset_ms || 0)
   const m = settings.margins
   // Mire de calibrage demandée depuis le dashboard : elle remplace tout, le temps du réglage.
   const cal = calibrationRemainingMs(nowMs)
@@ -224,6 +224,7 @@ app.get('/api/devices', { preHandler: adminOnly }, async () =>
       current_slide_id: r.slideId,
       current_creation_id: r.creationId,
       online: ago !== null && ago < ONLINE_WITHIN_MS,
+      refresh_pending: d.refresh_nonce > d.refreshed_nonce,
       seen_ago_seconds: ago === null ? null : Math.round(ago / 1000),
       shown_name: shownName(d, r),
     }
@@ -245,6 +246,15 @@ app.patch('/api/devices/:id', { preHandler: adminOnly }, async (req, reply) => {
   db.prepare('UPDATE devices SET name = ?, refresh_seconds = ? WHERE id = ?').run(b.name ?? d.name, b.refresh_seconds ?? d.refresh_seconds, d.id)
   notify([d.id])
   return db.prepare('SELECT * FROM devices WHERE id = ?').get(d.id)
+})
+
+// Forcer le rafraîchissement : le Pi efface puis redessine l'écran en entier (rémanences), même si l'image n'a pas changé.
+app.post('/api/devices/:id/refresh', { preHandler: adminOnly }, async (req, reply) => {
+  const d = db.prepare('SELECT id FROM devices WHERE id = ?').get(req.params.id)
+  if (!d) return reply.code(404).send({ error: 'écran introuvable' })
+  db.prepare('UPDATE devices SET refresh_nonce = refresh_nonce + 1 WHERE id = ?').run(d.id)
+  notify([d.id])
+  return { ok: true, refresh_nonce: db.prepare('SELECT refresh_nonce FROM devices WHERE id = ?').get(d.id).refresh_nonce }
 })
 
 app.delete('/api/devices/:id', { preHandler: adminOnly }, async (req) => {
@@ -303,6 +313,18 @@ app.patch('/api/slides/:id', { preHandler: adminOnly }, async (req, reply) => {
     .run(f.value.duration_seconds, f.value.starts_at, f.value.ends_at, f.value.enabled, cur.id)
   notify([cur.device_id])
   return db.prepare('SELECT * FROM playlist_items WHERE id = ?').get(cur.id)
+})
+
+// Afficher ce slide maintenant (s'il est actif) : on décale la phase de la rotation de l'écran pour qu'il commence tout de
+// suite ; la rotation reprend ensuite normalement avec les slides suivants.
+app.post('/api/slides/:id/show', { preHandler: adminOnly }, async (req, reply) => {
+  const slide = db.prepare('SELECT * FROM playlist_items WHERE id = ?').get(req.params.id)
+  if (!slide) return reply.code(404).send({ error: 'slide introuvable' })
+  const offset = offsetToShow(slidesOf(slide.device_id), slide.id, Date.now(), getSettings().default_slide_seconds)
+  if (offset === null) return reply.code(409).send({ error: "ce slide n'est pas actif en ce moment (désactivé, hors de sa période, ou sans image)" })
+  db.prepare('UPDATE devices SET phase_offset_ms = ? WHERE id = ?').run(Math.round(offset), slide.device_id)
+  notify([slide.device_id])
+  return { ok: true }
 })
 
 app.delete('/api/slides/:id', { preHandler: adminOnly }, async (req) => {
@@ -379,6 +401,9 @@ app.get('/api/device/current', { preHandler: deviceOnly }, async (req, reply) =>
   const shown = typeof req.query?.shown === 'string' && /^[0-9a-f]{40}$/.test(req.query.shown) ? req.query.shown : null
   const id = req.device.id
   touch(id, shown)
+  // Le Pi confirme le dernier « rafraîchissement forcé » pris en compte : le dashboard sait s'il est fait.
+  const nonce = /^\d{1,9}$/.test(String(req.query?.nonce ?? '')) ? Number(req.query.nonce) : null
+  if (nonce !== null) db.prepare('UPDATE devices SET refreshed_nonce = MAX(refreshed_nonce, ?) WHERE id = ?').run(nonce, id)
 
   let r = resolveForDevice(req.device)
   const wait = Math.min(MAX_WAIT_SECONDS, Number(req.query?.wait) || 0)
@@ -404,6 +429,7 @@ app.get('/api/device/current', { preHandler: deviceOnly }, async (req, reply) =>
     slide_id: r.slideId,
     slide_count: r.activeCount,
     version: versionOf(id),
+    refresh_nonce: d.refresh_nonce,
   }
 })
 

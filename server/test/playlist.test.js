@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { schedule, nextCheckSeconds, MIN_SLIDE_SECONDS } from '../src/playlist.js'
+import { schedule, nextCheckSeconds, offsetToShow, MIN_SLIDE_SECONDS } from '../src/playlist.js'
 
 const T = (s) => Date.parse(s)
 const slide = (id, o = {}) => ({ id, creation_id: id, position: id, duration_seconds: null, starts_at: null, ends_at: null, enabled: 1, png_hash: `h${id}`, ...o })
@@ -99,4 +99,39 @@ test('délai de retour du Pi : fin de créneau + 1 s, plafonné par le rafraîch
   assert.equal(nextCheckSeconds(Infinity, 300), 300)
   assert.equal(nextCheckSeconds(3_600_000, 300), 300, 'plafonné : on revient voir les modifications')
   assert.equal(nextCheckSeconds(100, 300), 5)
+})
+
+test('afficher ce slide maintenant : il commence à l’instant T pour toute sa durée, puis la rotation continue dans l’ordre', () => {
+  const items = [slide(1), slide(2, { duration_seconds: 90 }), slide(3)] // 60 + 90 + 60 = 210 s
+  const now = T('2026-06-01T10:17:42Z')
+  for (const target of [1, 2, 3]) {
+    const offset = offsetToShow(items, target, now, 60)
+    const at0 = schedule(items, now, 60, offset)
+    assert.equal(at0.item.id, target, `le slide ${target} est affiché tout de suite`)
+    const d = target === 2 ? 90_000 : 60_000
+    assert.equal(at0.nextChangeMs, d, 'pour toute sa durée')
+    assert.equal(schedule(items, now + d - 1, 60, offset).item.id, target)
+    assert.equal(schedule(items, now + d, 60, offset).item.id, (target % 3) + 1, 'puis le suivant de la playlist')
+  }
+})
+
+test('afficher maintenant : refusé (null) si le slide n’est pas actif, 0 s’il est seul', () => {
+  const now = T('2026-06-01T10:00:00Z')
+  const items = [
+    slide(1), slide(2),
+    slide(3, { enabled: 0 }), slide(4, { png_hash: null }),
+    slide(5, { starts_at: '2026-06-02T00:00:00Z' }), slide(6, { ends_at: '2026-05-01T00:00:00Z' }),
+  ]
+  for (const id of [3, 4, 5, 6, 99]) assert.equal(offsetToShow(items, id, now, 60), null, `slide ${id}`)
+  assert.notEqual(offsetToShow(items, 2, now, 60), null)
+  assert.equal(offsetToShow([slide(1)], 1, now, 60), 0)
+})
+
+test('un décalage de phase quelconque (même négatif ou énorme) reste cohérent', () => {
+  const items = [slide(1), slide(2)]
+  const now = T('2026-06-01T10:00:00Z')
+  for (const offset of [-7_000_000, 0, 31_000, 10 ** 12]) {
+    const r = schedule(items, now, 60, offset)
+    assert.ok([1, 2].includes(r.item.id) && r.nextChangeMs > 0 && r.nextChangeMs <= 60_000, `offset ${offset}`)
+  }
 })

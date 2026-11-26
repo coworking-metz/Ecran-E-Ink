@@ -64,6 +64,10 @@ export default function Playlist({ device, creations, defaultSeconds, onChange }
                     onBlur={(e) => { const v = fromLocalInput(e.target.value); if (v !== s.ends_at) patch(s, { ends_at: v }) }} />
                 </label>
                 <label className="check inline"><input type="checkbox" checked={!!s.enabled} onChange={(e) => patch(s, { enabled: e.target.checked })} /> Actif</label>
+                <button className="show-now" disabled={st.key !== 'on'} onClick={() => run(() => api.showSlide(s.id))}
+                  title={st.key === 'on' ? "Affiche ce slide tout de suite ; la rotation reprend ensuite avec les suivants" : "Ce slide n'est pas actif en ce moment (désactivé, hors de sa période ou sans image)"}>
+                  {device.current_slide_id === s.id ? '↻ Relancer' : '▶ Afficher maintenant'}
+                </button>
                 <span className="slide-actions">
                   <button title="Monter" disabled={i === 0} onClick={() => move(i, -1)}>↑</button>
                   <button title="Descendre" disabled={i === slides.length - 1} onClick={() => move(i, 1)}>↓</button>

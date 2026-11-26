@@ -54,6 +54,9 @@ addColumn('creations', 'template_hash', 'TEXT') // empreinte de la scène livré
 addColumn('assets', 'brand_key', 'TEXT')
 addColumn('devices', 'shown_hash', 'TEXT') // empreinte de l'image que l'écran dit afficher (rapportée par le Pi)
 addColumn('devices', 'shown_at', 'TEXT')
+addColumn('devices', 'refresh_nonce', 'INTEGER NOT NULL DEFAULT 0') // incrémenté par « forcer le rafraîchissement »
+addColumn('devices', 'refreshed_nonce', 'INTEGER NOT NULL DEFAULT 0') // dernier compteur pris en compte par le Pi
+addColumn('devices', 'phase_offset_ms', 'INTEGER NOT NULL DEFAULT 0') // décalage de la rotation (« afficher ce slide maintenant »)
 db.exec(`
   CREATE UNIQUE INDEX IF NOT EXISTS idx_creations_template_key ON creations(template_key) WHERE template_key IS NOT NULL;
   CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_brand_key ON assets(brand_key) WHERE brand_key IS NOT NULL;
