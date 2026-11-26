@@ -2,7 +2,9 @@
 """Client de l'écran e-ink : interroge l'API, affiche l'image publiée quand elle change.
 
 Config : ~/eink-pi/config.json  {"api_url": "https://…", "token": "…", "vcom": -1.81, "spi_hz": 12000000, "rotate": null,
-                                 "wait_seconds": 45, "settle_seconds": 3, "min_redraw_gap_seconds": 10}
+                                 "wait_seconds": 45, "settle_seconds": 0.8, "min_redraw_gap_seconds": 2}
+(settle_seconds : si présent, impose le délai de regroupement ; sinon c'est le serveur qui le dicte : 0 pour une action
+explicite du dashboard ou la rotation prévue, 0,8 s pour un simple enregistrement)
 Long-polling : le serveur garde la requête ouverte jusqu'à un changement (dashboard) ou la fin du slide en cours, donc
 l'écran réagit tout de suite. Avec un ancien serveur (sans `version`), retour à l'interrogation périodique.
 Usage  : client.py                 boucle (service systemd)
@@ -29,12 +31,13 @@ HOME = os.environ.get('EINK_PI_HOME') or os.path.expanduser('~/eink-pi')
 CONFIG = os.path.join(HOME, 'config.json')
 STATE = os.path.join(HOME, 'state.json')
 MIN_DELAY, MAX_DELAY, MAX_BACKOFF = 5, 3600, 600
-SETTLE = 3        # s : après un changement, on attend un peu et on relit (regroupe les enregistrements rapprochés)
-MIN_REDRAW_GAP = 10  # s : délai minimal entre deux rafraîchissements de la dalle (usure, flash)
+SETTLE = 0.8        # s : par défaut, après un enregistrement on attend un peu et on relit (regroupe les modifications rapprochées)
+MIN_REDRAW_GAP = 2  # s : écart minimal entre deux rafraîchissements de la dalle (usure, flash) ; la rotation, elle, ≥ 30 s
 log = logging.getLogger('eink')
 stop = False
 in_wait = False  # vrai pendant une requête de long-polling : un arrêt peut alors sortir tout de suite
 last_draw = 0.0
+_display = None  # contrôleur IT8951 initialisé une fois (2,4 s), puis simplement réveillé avant chaque dessin (0,2 s)
 
 
 def retry_delay(failures):
@@ -67,13 +70,53 @@ def http_get(cfg, path, timeout=30):
         return r.read()
 
 
+def wake(display, vcom):
+    """Réveille le contrôleur endormi : mêmes réglages que l'initialisation (adresse du tampon, mode I80, VCOM) mais sans
+    rouvrir le SPI ni relire les infos système. 0,2 s au lieu des 2,4 s d'une réinitialisation complète."""
+    from IT8951.constants import Registers
+    epd = display.epd
+    epd.run()
+    epd._set_img_buf_base_addr(epd.img_buf_address)
+    epd.write_register(Registers.I80CPCR, 0x1)
+    epd.set_vcom(vcom)
+
+
+def get_display(cfg):
+    """Contrôleur prêt à dessiner : créé au premier usage, réveillé ensuite."""
+    global _display
+    vcom = cfg.get('vcom', -1.81)
+    if _display is None:
+        from IT8951.display import AutoEPDDisplay
+        t0 = time.time()
+        _display = AutoEPDDisplay(vcom=vcom, rotate=cfg.get('rotate'), spi_hz=cfg.get('spi_hz', 12_000_000))
+        log.info('contrôleur initialisé en %.1f s', time.time() - t0)
+    else:
+        wake(_display, vcom)
+    return _display
+
+
+def sleep_display():
+    sleep = getattr(_display.epd, 'sleep', None) or getattr(_display.epd, 'standby', None) if _display else None
+    if sleep:
+        sleep()
+
+
+def prewarm(cfg):
+    """Initialise le contrôleur dès le démarrage : le premier dessin demandé par le dashboard n'attend pas 2,4 s."""
+    try:
+        get_display(cfg)
+        sleep_display()
+    except Exception as e:  # matériel absent ou SPI désactivé : le premier dessin réessaiera et le dira
+        log.error('préchauffage du contrôleur impossible : %s', e)
+
+
 def show(cfg, img, clear=False):
     """Envoie l'image au contrôleur IT8951 (GC16 : 16 gris, avec flash) puis le met en veille.
     clear : efface d'abord l'écran en blanc (rafraîchissement forcé : élimine les rémanences)."""
+    global _display
     from IT8951.constants import DisplayModes
-    from IT8951.display import AutoEPDDisplay
 
-    display = AutoEPDDisplay(vcom=cfg.get('vcom', -1.81), rotate=cfg.get('rotate'), spi_hz=cfg.get('spi_hz', 12_000_000))
+    display = get_display(cfg)
     try:
         size = (display.width, display.height)
         img = img.convert('L')
@@ -86,10 +129,14 @@ def show(cfg, img, clear=False):
         t0 = time.time()
         display.draw_full(DisplayModes.GC16)
         log.info('affiché en %.1f s', time.time() - t0)
-    finally:
-        sleep = getattr(display.epd, 'sleep', None) or getattr(display.epd, 'standby', None)
-        if sleep:
-            sleep()
+    except Exception:
+        _display = None  # état du contrôleur incertain : réinitialisation complète au prochain dessin
+        raise
+    try:
+        sleep_display()
+    except Exception as e:
+        log.warning('mise en veille du contrôleur impossible : %s', e)
+        _display = None
 
 
 def fetch_current(cfg, version=None, wait=0):
@@ -135,9 +182,12 @@ def update_display(cfg, cur):
     draw, forced = needs_draw(cur)
     if not draw:
         return cur
-    if not forced:
-        # Plusieurs modifications peuvent se suivre : on laisse se poser, on relit, puis on dessine une seule fois.
-        time.sleep(cfg.get('settle_seconds', SETTLE))
+    # Délai de regroupement : 0 pour une action explicite (afficher maintenant, rafraîchir, calibrage) ou la rotation prévue,
+    # court pour un enregistrement. Plusieurs modifications peuvent se suivre : on laisse se poser, on relit, puis on
+    # dessine une seule fois.
+    settle = cfg['settle_seconds'] if 'settle_seconds' in cfg else cur.get('settle_seconds', SETTLE)
+    if not forced and settle > 0:
+        time.sleep(settle)
         cur = fetch_current(cfg)
         draw, forced = needs_draw(cur)
         if not draw:
@@ -195,6 +245,7 @@ def main():
 
     failures = 0
     version = None
+    prewarm(cfg)
     while not stop:
         started = time.time()
         try:

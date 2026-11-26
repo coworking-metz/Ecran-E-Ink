@@ -18,6 +18,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const lines = () => (existsSync(logFile) ? readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean) : [])
 const draws = () => lines().filter((l) => l.startsWith('draw'))
 const clears = () => lines().filter((l) => l.startsWith('clear'))
+const count = (word) => lines().filter((l) => l.startsWith(word)).length
 const centre = (line) => Number(/centre=(\d+)/.exec(line)[1])
 const at = (line) => Number(/t=([\d.]+)/.exec(line)[1])
 async function until(cond, ms, what) {
@@ -103,10 +104,60 @@ test('le client suit le dashboard en direct, regroupe les modifications rapproch
   assert.equal(listed.online, true)
   assert.equal(listed.shown_name, 'c')
 
+  // Le contrôleur n'est initialisé qu'une fois (2,4 s sur le vrai Pi) puis réveillé avant chaque dessin (0,2 s).
+  assert.equal(count('init'), 1, 'une seule initialisation complète du contrôleur')
+  assert.ok(count('wake') >= draws().length - 1, `réveil léger avant chaque dessin suivant (${count('wake')} réveils pour ${draws().length} dessins)`)
+
   // Arrêt (systemctl stop/restart) : le client est au milieu d'un long-polling de 30 s, il doit sortir tout de suite.
   const exited = new Promise((r) => client.once('exit', (code) => r(code)))
   const t1 = Date.now()
   client.kill('SIGTERM')
   assert.equal(await exited, 0)
   assert.ok(Date.now() - t1 < 3000, `arrêt en ${Date.now() - t1} ms`)
+})
+
+test('actions explicites : le Pi dessine sans délai de regroupement ; un enregistrement, lui, est regroupé', { skip: !pythonOk && 'python3 + Pillow requis' }, async () => {
+  const home2 = mkdtempSync(join(tmpdir(), 'eink-pi2-'))
+  const log2 = join(home2, 'draws.log')
+  const read = () => (existsSync(log2) ? readFileSync(log2, 'utf8').trim().split('\n').filter((l) => l.startsWith('draw')) : [])
+  let client2
+  try {
+    const dev = await json('POST', '/api/devices', { name: 'rapide' })
+    const mk = async (name, shade) => { const c = await json('POST', '/api/creations', { name }); await setImage(c.id, shade); return c }
+    const a = await mk('a', 60), b = await mk('b', 200)
+    const sa = await json('POST', `/api/devices/${dev.id}/slides`, { creation_id: a.id, duration_seconds: 3600 })
+    const sb = await json('POST', `/api/devices/${dev.id}/slides`, { creation_id: b.id, duration_seconds: 3600 })
+    // Pas de settle_seconds dans la config : c'est le serveur qui dicte le délai de regroupement.
+    writeFileSync(join(home2, 'config.json'), JSON.stringify({ api_url: srv.base, token: dev.token, wait_seconds: 30, min_redraw_gap_seconds: 0.2 }))
+    client2 = spawn('python3', ['pi/client.py'], {
+      cwd: ROOT,
+      env: { PATH: process.env.PATH, EINK_PI_HOME: home2, PYTHONPATH: join(ROOT, 'pi/tests/fake'), EINK_FAKE_LOG: log2 },
+      stdio: 'ignore',
+    })
+    await until(() => read().length === 1, 8000, 'premier affichage')
+    await sleep(500) // le client est maintenant en attente de changement
+
+    // Afficher maintenant l'autre slide : aucune attente de regroupement, seulement téléchargement + dessin.
+    const shown = centre(read()[0])
+    const other = shown === 60 ? sb : sa
+    const t0 = Date.now()
+    await api('POST', `/api/slides/${other.id}/show`)
+    await until(() => read().length === 2, 5000, 'affichage immédiat')
+    const urgent = at(read()[1]) * 1000 - t0
+    assert.ok(urgent < 1000, `action explicite : image dessinée ${Math.round(urgent)} ms après le clic (attendu < 1 s)`)
+    assert.notEqual(centre(read()[1]), shown)
+
+    // Un simple enregistrement : le Pi laisse se poser (0,8 s) pour regrouper d'éventuels enregistrements suivants.
+    await sleep(500)
+    const t1 = Date.now()
+    await setImage(other.creation_id, 130)
+    await until(() => read().length === 3, 5000, 'affichage après enregistrement')
+    const edit = at(read()[2]) * 1000 - t1
+    assert.ok(edit >= 700, `enregistrement : regroupement conseillé (${Math.round(edit)} ms, attendu ≥ 0,7 s)`)
+    assert.ok(edit < 3000, `mais pas d'attente excessive (${Math.round(edit)} ms)`)
+    assert.equal(centre(read()[2]), 130)
+  } finally {
+    client2?.kill('SIGKILL')
+    rmSync(home2, { recursive: true, force: true })
+  }
 })

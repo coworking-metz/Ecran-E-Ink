@@ -97,6 +97,7 @@ test('fin de créneau : l’attente se termine pile quand la composition de la p
   const { body, ms } = await current(dev, `?wait=20&v=${first.version}`)
   assert.ok(ms >= 1500 && ms < 4000, `réveillé au début du slide programmé (${ms} ms)`)
   assert.equal(body.slide_count, 2)
+  assert.equal(body.settle_seconds, 0, 'changement prévu (fin de créneau) : le Pi dessine sans attendre')
 })
 
 test('l’écran rapporte ce qu’il affiche ; le dashboard le voit, et le voit en ligne', async () => {

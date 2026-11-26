@@ -110,3 +110,22 @@ test('forcer le rafraîchissement : compteur, réveil immédiat, accusé de réc
   assert.equal((await api('POST', '/api/devices/99999/refresh')).status, 404)
   assert.equal((await api('POST', `/api/devices/${dev.id}/refresh`, null, {})).status, 401)
 })
+
+test('délai de regroupement conseillé au Pi : 0 pour une action explicite et la rotation, court pour un enregistrement', async () => {
+  const { dev, slides } = await playlist(2)
+  const settle = async () => (await current(dev)).body.settle_seconds
+  await api('POST', `/api/slides/${slides[1].id}/show`)
+  assert.equal(await settle(), 0, 'afficher maintenant : sans attente')
+  await json('POST', `/api/devices/${dev.id}/refresh`)
+  assert.equal(await settle(), 0, 'rafraîchissement forcé : sans attente')
+  await json('PUT', '/api/settings', { margins: { top: 5, right: 5, bottom: 5, left: 5 } })
+  assert.equal(await settle(), 0, 'marges : sans attente')
+  await json('PUT', '/api/settings', { margins: { top: 0, right: 0, bottom: 0, left: 0 } })
+  await json('POST', '/api/calibration', { on: true })
+  assert.equal(await settle(), 0, 'mire : sans attente')
+  await json('POST', '/api/calibration', { on: false })
+  // Un simple enregistrement de création : le Pi doit pouvoir regrouper des enregistrements rapprochés.
+  const png = (await sharp({ create: { width: 20, height: 20, channels: 3, background: { r: 9, g: 9, b: 9 } } }).png().toBuffer()).toString('base64')
+  await api('PUT', `/api/creations/${slides[0].creation_id}`, { png: `data:image/png;base64,${png}` })
+  assert.equal(await settle(), 0.8, 'enregistrement : regroupement conseillé')
+})

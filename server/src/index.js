@@ -9,7 +9,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { db, CREATIONS_DIR, ASSETS_DIR, getSettings, setSetting } from './db.js'
 import { schedule, nextCheckSeconds, offsetToShow, MIN_SLIDE_SECONDS } from './playlist.js'
-import { notify, waitForChange, versionOf } from './hub.js'
+import { notify, waitForChange, versionOf, reasonOf, URGENT_REASONS } from './hub.js'
 import { parseMargins, canvasSize, finalHash, composeFinal, calibrationStart, calibrationStop, calibrationRemainingMs, calibrationHash, calibrationImage } from './screen.js'
 import { seedBrand } from './brand.js'
 import { registerAuth, sessionUser, SSO_ENABLED, SSO_PARTIAL } from './auth.js'
@@ -253,7 +253,7 @@ app.post('/api/devices/:id/refresh', { preHandler: adminOnly }, async (req, repl
   const d = db.prepare('SELECT id FROM devices WHERE id = ?').get(req.params.id)
   if (!d) return reply.code(404).send({ error: 'écran introuvable' })
   db.prepare('UPDATE devices SET refresh_nonce = refresh_nonce + 1 WHERE id = ?').run(d.id)
-  notify([d.id])
+  notify([d.id], 'refresh')
   return { ok: true, refresh_nonce: db.prepare('SELECT refresh_nonce FROM devices WHERE id = ?').get(d.id).refresh_nonce }
 })
 
@@ -323,7 +323,7 @@ app.post('/api/slides/:id/show', { preHandler: adminOnly }, async (req, reply) =
   const offset = offsetToShow(slidesOf(slide.device_id), slide.id, Date.now(), getSettings().default_slide_seconds)
   if (offset === null) return reply.code(409).send({ error: "ce slide n'est pas actif en ce moment (désactivé, hors de sa période, ou sans image)" })
   db.prepare('UPDATE devices SET phase_offset_ms = ? WHERE id = ?').run(Math.round(offset), slide.device_id)
-  notify([slide.device_id])
+  notify([slide.device_id], 'show')
   return { ok: true }
 })
 
@@ -371,7 +371,7 @@ app.put('/api/settings', { preHandler: adminOnly }, async (req, reply) => {
     if (m.error) return reply.code(400).send({ error: m.error })
     setSetting('margins', m.value)
   }
-  notify(allDeviceIds())
+  notify(allDeviceIds(), 'margins' in b ? 'margins' : 'edit')
   return settingsView()
 })
 
@@ -382,7 +382,7 @@ app.post('/api/calibration', { preHandler: adminOnly }, async (req, reply) => {
     if (!Number.isInteger(seconds) || seconds < 1 || seconds > 3600) return reply.code(400).send({ error: 'durée : de 1 à 3600 secondes' })
     calibrationStart(seconds)
   } else calibrationStop()
-  notify(allDeviceIds())
+  notify(allDeviceIds(), 'calibration')
   return settingsView()
 })
 
@@ -406,11 +406,12 @@ app.get('/api/device/current', { preHandler: deviceOnly }, async (req, reply) =>
   if (nonce !== null) db.prepare('UPDATE devices SET refreshed_nonce = MAX(refreshed_nonce, ?) WHERE id = ?').run(nonce, id)
 
   let r = resolveForDevice(req.device)
+  let woke = 'immediate' // pourquoi cette réponse part maintenant
   const wait = Math.min(MAX_WAIT_SECONDS, Number(req.query?.wait) || 0)
   const known = typeof req.query?.v === 'string' ? req.query.v : null
   if (wait > 0 && known === versionOf(id)) {
     const slotMs = Number.isFinite(r.nextChangeMs) ? r.nextChangeMs + 100 : Infinity
-    await waitForChange(id, known, Math.min(wait * 1000, slotMs), reply.raw)
+    woke = await waitForChange(id, known, Math.min(wait * 1000, slotMs), reply.raw)
     if (reply.raw.destroyed) return reply // client parti : rien à renvoyer
     const fresh = db.prepare('SELECT * FROM devices WHERE id = ?').get(id)
     if (!fresh) return reply.code(401).send({ error: 'unauthorized' })
@@ -430,6 +431,10 @@ app.get('/api/device/current', { preHandler: deviceOnly }, async (req, reply) =>
     slide_count: r.activeCount,
     version: versionOf(id),
     refresh_nonce: d.refresh_nonce,
+    // Délai de regroupement conseillé au Pi avant de dessiner : 0 pour une action explicite (afficher maintenant,
+    // rafraîchir, calibrage) et pour la rotation prévue (fin de créneau) ; court pour les enregistrements, que le Pi
+    // regroupe quand ils se suivent.
+    settle_seconds: woke === 'timeout' || URGENT_REASONS.has(reasonOf(id)) ? 0 : 0.8,
   }
 })
 

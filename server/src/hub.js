@@ -7,13 +7,20 @@ export const bootId = randomBytes(4).toString('hex')
 
 const versions = new Map() // deviceId -> compteur
 const waiters = new Map() // deviceId -> Set<fonction de réveil>
+const reasons = new Map() // deviceId -> raison de la dernière notification
 
 // Jeton de version d'un écran : change à chaque modification qui peut affecter ce qu'il affiche.
 export const versionOf = (deviceId) => `${bootId}.${versions.get(deviceId) ?? 0}`
 
-export function notify(deviceIds) {
+// Raisons « urgentes » : une action explicite de l'utilisateur, à appliquer sans délai de regroupement.
+// Les autres (`edit` : enregistrement d'une création, modification de playlist…) sont regroupées par le Pi.
+export const URGENT_REASONS = new Set(['show', 'refresh', 'calibration', 'margins'])
+export const reasonOf = (deviceId) => reasons.get(deviceId) ?? 'edit'
+
+export function notify(deviceIds, reason = 'edit') {
   for (const id of new Set(deviceIds)) {
     versions.set(id, (versions.get(id) ?? 0) + 1)
+    reasons.set(id, reason)
     for (const wake of [...(waiters.get(id) ?? [])]) wake()
   }
 }

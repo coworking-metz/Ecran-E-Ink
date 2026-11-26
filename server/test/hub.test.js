@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { bootId, notify, versionOf, waitForChange, waiterCount } from '../src/hub.js'
+import { bootId, notify, versionOf, waitForChange, waiterCount, reasonOf, URGENT_REASONS } from '../src/hub.js'
 
 const id = () => Math.floor(Math.random() * 1e9) // identifiants isolés d'un test à l'autre
 
@@ -62,4 +62,15 @@ test('une notification réveille toutes les attentes du même écran, pas celles
   notify([d])
   assert.deepEqual(await Promise.all(mine), ['changed', 'changed'])
   assert.equal(await theirs, 'timeout')
+})
+
+test('la raison de la dernière notification est mémorisée ; « edit » par défaut ; actions explicites urgentes', () => {
+  const d = id()
+  assert.equal(reasonOf(d), 'edit')
+  notify([d], 'show')
+  assert.equal(reasonOf(d), 'show')
+  notify([d])
+  assert.equal(reasonOf(d), 'edit', 'une notification sans raison redevient une modification ordinaire')
+  for (const r of ['show', 'refresh', 'calibration', 'margins']) assert.ok(URGENT_REASONS.has(r), r)
+  assert.ok(!URGENT_REASONS.has('edit'), 'un enregistrement n’est pas urgent : le Pi regroupe')
 })
