@@ -5,6 +5,7 @@ import { api } from './api.js'
 import { BRAND_FONTS, SYSTEM_FONTS, PALETTE, loadBrandFonts } from './fonts.js'
 import { textAttrs, rectAttrs, imageAttrs, assetUrl } from './sceneUtils.js'
 import { applyForm } from './form.js'
+import { fitScene } from './sceneFit.js'
 import { qrDataUrl } from './renderScene.js'
 
 const uid = () => Math.random().toString(36).slice(2, 10)
@@ -112,7 +113,13 @@ export default function Editor({ id }) {
   const fileRef = useRef(null)
 
   useEffect(() => {
-    api.creation(id).then((c) => { setScene(applyForm(c.scene)); setName(c.name); setIsTemplate(!!c.is_template); setMode(c.scene.form?.fields?.length ? 'form' : 'layers') })
+    // Le canvas = écran moins les marges du passe-partout (page Calibrage). Une scène conçue à une autre taille
+    // (anciens slides, templates en 1200 × 825) est remise à l'échelle à l'ouverture.
+    Promise.all([api.creation(id), api.settings()]).then(([c, st]) => {
+      const fitted = fitScene(c.scene, st.canvas.width, st.canvas.height)
+      if (fitted !== c.scene) setStatus(`Ajusté à la zone utile de l’écran (${st.canvas.width} × ${st.canvas.height}) : enregistre pour le conserver`)
+      setScene(applyForm(fitted)); setName(c.name); setIsTemplate(!!c.is_template); setMode(c.scene.form?.fields?.length ? 'form' : 'layers')
+    })
     api.assets().then(setAssets)
     api.devices().then(setDevices)
     // Les polices doivent être chargées avant le premier rendu du canvas (sinon mesure du texte erronée).

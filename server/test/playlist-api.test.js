@@ -27,7 +27,9 @@ before(async () => { srv = await startServer({ ADMIN_PASSWORD: 'pw' }) })
 after(() => srv?.stop())
 
 test('options : valeurs par défaut, validation, persistance', async () => {
-  assert.deepEqual(await json('GET', '/api/settings'), { default_slide_seconds: 120, fallback_creation_id: null })
+  const defaults = await json('GET', '/api/settings')
+  assert.equal(defaults.default_slide_seconds, 120)
+  assert.equal(defaults.fallback_creation_id, null)
   assert.equal((await api('PUT', '/api/settings', { default_slide_seconds: 10 })).status, 400, 'sous le plancher')
   assert.equal((await api('PUT', '/api/settings', { default_slide_seconds: 'abc' })).status, 400)
   assert.equal((await api('PUT', '/api/settings', { fallback_creation_id: 99999 })).status, 400, 'création inconnue')

@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Client de l'écran e-ink : interroge l'API, affiche l'image publiée quand elle change.
 
-Config : ~/eink-pi/config.json  {"api_url": "https://…", "token": "…", "vcom": -1.81, "spi_hz": 12000000, "rotate": null}
+Config : ~/eink-pi/config.json  {"api_url": "https://…", "token": "…", "vcom": -1.81, "spi_hz": 12000000, "rotate": null,
+                                 "wait_seconds": 45, "settle_seconds": 3, "min_redraw_gap_seconds": 10}
+Long-polling : le serveur garde la requête ouverte jusqu'à un changement (dashboard) ou la fin du slide en cours, donc
+l'écran réagit tout de suite. Avec un ancien serveur (sans `version`), retour à l'interrogation périodique.
 Usage  : client.py                 boucle (service systemd)
          client.py --once          un seul passage puis sortie
          client.py --image f.png   affiche un fichier local (test), sans API
@@ -17,6 +20,7 @@ import signal
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from PIL import Image, ImageOps
@@ -25,8 +29,12 @@ HOME = os.environ.get('EINK_PI_HOME') or os.path.expanduser('~/eink-pi')
 CONFIG = os.path.join(HOME, 'config.json')
 STATE = os.path.join(HOME, 'state.json')
 MIN_DELAY, MAX_DELAY, MAX_BACKOFF = 5, 3600, 600
+SETTLE = 3        # s : après un changement, on attend un peu et on relit (regroupe les enregistrements rapprochés)
+MIN_REDRAW_GAP = 10  # s : délai minimal entre deux rafraîchissements de la dalle (usure, flash)
 log = logging.getLogger('eink')
 stop = False
+in_wait = False  # vrai pendant une requête de long-polling : un arrêt peut alors sortir tout de suite
+last_draw = 0.0
 
 
 def load_json(path, default=None):
@@ -75,25 +83,58 @@ def show(cfg, img):
             sleep()
 
 
-def poll(cfg):
-    """Un passage. Renvoie le délai avant le suivant (secondes)."""
-    cur = json.loads(http_get(cfg, '/api/device/current'))
-    # Le serveur choisit le slide du moment et dit quand revenir (fin du créneau, ou au plus `refresh_seconds`).
-    wait = cur.get('next_check_seconds') or cur.get('refresh_seconds') or 300
-    delay = min(MAX_DELAY, max(MIN_DELAY, int(wait)))
+def fetch_current(cfg, version=None, wait=0):
+    """Interroge /api/device/current ; avec `version` et `wait`, le serveur retient la réponse jusqu'à un changement."""
+    q = {}
+    shown = load_json(STATE, {}).get('hash')
+    if shown:
+        q['shown'] = shown  # ce que l'écran affiche : visible dans le dashboard
+    if version and wait:
+        q.update(wait=wait, v=version)
+    path = '/api/device/current' + ('?' + urllib.parse.urlencode(q) if q else '')
+    global in_wait
+    in_wait = bool(version and wait)
+    try:
+        return json.loads(http_get(cfg, path, timeout=(wait + 20) if wait else 30))
+    finally:
+        in_wait = False
+
+
+def update_display(cfg, cur):
+    """Affiche l'image annoncée si elle diffère de celle déjà à l'écran. Renvoie la réponse la plus récente."""
+    global last_draw
     h = cur.get('hash')
-    if not h:
-        log.info("aucune création assignée à cet écran")
-    elif h == load_json(STATE, {}).get('hash'):
-        log.info('inchangé (%s)', h[:8])
-    else:
-        log.info('nouvelle image %s (slide %s sur %s actifs) : téléchargement', h[:8], cur.get('slide_id'), cur.get('slide_count'))
-        img = Image.open(io.BytesIO(http_get(cfg, cur['image_url'], timeout=60)))
-        img.load()
-        show(cfg, img)
-        save_state(hash=h, shown_at=int(time.time()))
+    if not h or h == load_json(STATE, {}).get('hash'):
+        return cur
+    # Plusieurs modifications peuvent se suivre : on laisse se poser, on relit, puis on dessine une seule fois.
+    time.sleep(cfg.get('settle_seconds', SETTLE))
+    cur = fetch_current(cfg)
+    h = cur.get('hash')
+    if not h or h == load_json(STATE, {}).get('hash'):
+        return cur
+    gap = cfg.get('min_redraw_gap_seconds', MIN_REDRAW_GAP) - (time.time() - last_draw)
+    if gap > 0:
+        time.sleep(gap)
+    log.info('nouvelle image %s (slide %s sur %s actifs) : téléchargement', h[:8], cur.get('slide_id'), cur.get('slide_count'))
+    img = Image.open(io.BytesIO(http_get(cfg, cur['image_url'], timeout=60)))
+    img.load()
+    show(cfg, img)
+    last_draw = time.time()
+    save_state(hash=h, shown_at=int(time.time()))
+    return cur
+
+
+def poll(cfg, version=None):
+    """Un passage. Renvoie (délai avant le suivant, version). Avec la version, le passage suivant attend côté serveur."""
+    wait = int(cfg.get('wait_seconds', 45))
+    cur = update_display(cfg, fetch_current(cfg, version, wait))
+    new_version = cur.get('version')
+    if new_version:
+        return 0, new_version  # long-polling : c'est le serveur qui fait patienter
+    # Ancien serveur : le serveur dit quand revenir (fin du créneau, ou au plus `refresh_seconds`).
+    delay = min(MAX_DELAY, max(MIN_DELAY, int(cur.get('next_check_seconds') or cur.get('refresh_seconds') or 300)))
     log.info('prochain passage dans %ss', delay)
-    return delay
+    return delay, None
 
 
 def main():
@@ -113,25 +154,33 @@ def main():
     def on_signal(*_):
         global stop
         stop = True
+        if in_wait:  # simple attente de changement : rien à terminer proprement, on sort tout de suite
+            raise SystemExit(0)
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
 
     failures = 0
+    version = None
     while not stop:
+        started = time.time()
         try:
-            delay = poll(cfg)
+            delay, version = poll(cfg, version)
             failures = 0
         except urllib.error.HTTPError as e:
+            version = None
             failures += 1
             delay = min(MAX_BACKOFF, 30 * 2 ** min(failures, 5))
             log.error('API : HTTP %s%s (nouvel essai dans %ss)', e.code, ' : jeton refusé ?' if e.code == 401 else '', delay)
         except Exception as e:  # réseau coupé, contrôleur absent… : on réessaie, on ne meurt pas
+            version = None
             failures += 1
             delay = min(MAX_BACKOFF, 30 * 2 ** min(failures, 5))
             log.error('%s : %s (nouvel essai dans %ss)', type(e).__name__, e, delay)
         if args.once:
             return
-        end = time.time() + delay + random.uniform(0, 2)
+        if not delay:  # long-polling : relance immédiate, mais jamais en boucle serrée si le serveur répond sans attendre
+            delay = max(0, 1 - (time.time() - started))
+        end = time.time() + delay + (random.uniform(0, 2) if delay > 5 else 0)
         while not stop and time.time() < end:
             time.sleep(1)
 

@@ -4,6 +4,7 @@ import Creations from './Creations.jsx'
 import Editor from './Editor.jsx'
 import Devices from './Devices.jsx'
 import Settings from './Settings.jsx'
+import Calibration from './Calibration.jsx'
 
 const AUTH_ERRORS = {
   forbidden: "Ce compte n'a pas les droits d'administration de l'outil.",
@@ -96,12 +97,13 @@ export default function App() {
         <nav>
           <a href="#/creations" className={route.page === 'creations' ? 'active' : ''}>Créations</a>
           <a href="#/devices" className={route.page === 'devices' ? 'active' : ''}>Écrans</a>
+          <a href="#/calibration" className={route.page === 'calibration' ? 'active' : ''}>Calibrage</a>
           <a href="#/settings" className={route.page === 'settings' ? 'active' : ''}>Options</a>
         </nav>
         {user && <span className="muted">{user.name}</span>}
         <button onClick={logout}>Déconnexion</button>
       </header>
-      <main>{route.page === 'devices' ? <Devices /> : route.page === 'settings' ? <Settings /> : <Creations />}</main>
+      <main>{route.page === 'devices' ? <Devices /> : route.page === 'settings' ? <Settings /> : route.page === 'calibration' ? <Calibration /> : <Creations />}</main>
     </div>
   )
 }

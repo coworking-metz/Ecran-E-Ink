@@ -3,6 +3,7 @@
 //   node scripts/screenshot.mjs <route> <sortie.png> [--wait 4000] [--size 1500x900] [--seed demo] [--copy-previews <dossier>]
 //   exemples de routes : /creations   /devices   /settings   /editor/3
 // --seed demo          crée un écran avec une playlist d'exemple (slides actifs, à venir, terminé, désactivé)
+// --seed margins       applique des marges de passe-partout d'exemple (page Calibrage, canvas réduit de l'éditeur)
 // --copy-previews dir  copie les PNG des templates générées par la page Créations (attendre assez longtemps)
 // Chrome : variable CHROME, sinon google-chrome / chromium détectés dans le PATH. Build préalable : npm run build.
 import { spawn, execFileSync } from 'node:child_process'
@@ -27,6 +28,9 @@ const PASSWORD = 'screenshot'
 const auth = { Authorization: `Bearer ${PASSWORD}`, 'Content-Type': 'application/json' }
 
 const seeds = {
+  async margins(base) {
+    await fetch(base + '/api/settings', { method: 'PUT', headers: auth, body: JSON.stringify({ margins: { top: 18, right: 36, bottom: 24, left: 30 } }) })
+  },
   async demo(base) {
     const api = async (method, path, body) => (await fetch(base + path, { method, headers: auth, body: body ? JSON.stringify(body) : undefined })).json()
     const mk = async (name, shade) => {

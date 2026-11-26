@@ -52,6 +52,8 @@ addColumn('creations', 'is_template', 'INTEGER NOT NULL DEFAULT 0')
 addColumn('creations', 'template_key', 'TEXT')
 addColumn('creations', 'template_hash', 'TEXT') // empreinte de la scène livrée : sert à savoir si l'utilisateur a modifié le template
 addColumn('assets', 'brand_key', 'TEXT')
+addColumn('devices', 'shown_hash', 'TEXT') // empreinte de l'image que l'écran dit afficher (rapportée par le Pi)
+addColumn('devices', 'shown_at', 'TEXT')
 db.exec(`
   CREATE UNIQUE INDEX IF NOT EXISTS idx_creations_template_key ON creations(template_key) WHERE template_key IS NOT NULL;
   CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_brand_key ON assets(brand_key) WHERE brand_key IS NOT NULL;
@@ -85,7 +87,7 @@ db.exec(`
     AND NOT EXISTS (SELECT 1 FROM playlist_items p WHERE p.device_id = d.id)
 `)
 
-export const SETTING_DEFAULTS = { default_slide_seconds: 120, fallback_creation_id: null }
+export const SETTING_DEFAULTS = { default_slide_seconds: 120, fallback_creation_id: null, margins: { top: 0, right: 0, bottom: 0, left: 0 } }
 export const getSettings = () => {
   const out = { ...SETTING_DEFAULTS }
   for (const { key, value } of db.prepare('SELECT key, value FROM settings').all()) if (key in out) out[key] = JSON.parse(value)

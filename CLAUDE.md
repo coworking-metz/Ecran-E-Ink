@@ -36,7 +36,19 @@ Sans SSO, `ADMIN_PASSWORD` est le mot de passe admin (défaut `admin` avec un av
 
 ### API
 Routes : `server/src/index.js` (`adminOnly` = session SSO, ou mot de passe en Bearer si le SSO n'est pas configuré ; `deviceOnly` = jeton d'écran).
-Pi (Bearer = token du device) : `GET /api/device/current` → `{hash, image_url, next_check_seconds, slide_id, slide_count, …}` (met à jour `last_seen`) ; `GET /api/device/image?creation=<id>` → PNG (limité aux créations de la playlist de l'écran).
+Pi (Bearer = token du device) : `GET /api/device/current` → `{hash, image_url, version, next_check_seconds, slide_id, slide_count, …}` (met à jour `last_seen`) ; `GET /api/device/image?creation=<id>` → PNG finale (limité aux créations de la playlist de l'écran).
+
+### Long-polling (`server/src/hub.js`)
+- `GET /api/device/current?wait=<s>&v=<version>&shown=<hash>` : le serveur retient la réponse jusqu'à un changement du dashboard (le hub réveille les écrans concernés), la fin du créneau du slide en cours, ou `wait` s (45 max : Cloudflare coupe à 100 s). Sans `v`, ou avec une version périmée (autre `bootId` après un redémarrage), réponse immédiate. Les anciens clients (sans `wait`) gardent `next_check_seconds`.
+- État en mémoire : un seul process serveur (pm2 en mode fork). `shown` = hash de ce que le Pi affiche, visible dans la page Écrans (en ligne, « affiche : … »).
+- Client (`pi/client.py`) : regroupe les modifications rapprochées (`settle_seconds`) et espace les rafraîchissements (`min_redraw_gap_seconds`, usure de la dalle) ; sort tout de suite sur SIGTERM. Testé contre le vrai serveur avec un faux pilote (`pi/tests/fake`, `server/test/pi-client.test.js`, ignoré sans Python + Pillow).
+
+### Calibrage du passe-partout (`server/src/screen.js`)
+- Réglage global `margins` (px haut/droite/bas/gauche, 0–200) dans la page **Calibrage**. Le **canvas des slides = écran moins les marges** ; les créations sont stockées à cette taille et le serveur les **centre dans un cadre noir 1200×825 à la livraison** (`composeFinal`), donc un changement de marges s'applique tout de suite à tous les slides sans les ré-enregistrer (au besoin un slide d'une autre taille est étiré dans la zone utile).
+- L'empreinte envoyée au Pi inclut les marges (`finalHash`) ; sans marge, elle est inchangée (aucun retéléchargement).
+- Les scènes conçues à une autre taille (anciens slides, templates en 1200×825) sont remises à l'échelle à l'ouverture dans l'éditeur (`admin/src/sceneFit.js` : positions proportionnelles, texte et QR à l'échelle uniforme, fond plein cadre recalé).
+- **Mire de calibrage** (`POST /api/calibration`) : cadre, graduations et cotes affichés sur l'écran réel, 15 min max (état en mémoire). Elle remplace temporairement la playlist.
+- Les assertions de pixel de `server/test/screen.test.js` sont au pixel près : un décalage d'un pixel doit faire échouer.
 
 ### SSO WordPress (`server/src/auth.js`)
 - Flux **Authorization Code + PKCE (S256), client public sans secret**, entièrement côté serveur : les jetons WordPress ne vont jamais au navigateur, qui ne reçoit qu'un cookie de session signé (HMAC-SHA256, `HttpOnly`, `SameSite=Lax`, `Secure` en HTTPS, 7 jours par défaut).

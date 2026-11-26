@@ -9,6 +9,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { db, CREATIONS_DIR, ASSETS_DIR, getSettings, setSetting } from './db.js'
 import { schedule, nextCheckSeconds, MIN_SLIDE_SECONDS } from './playlist.js'
+import { notify, waitForChange, versionOf } from './hub.js'
+import { parseMargins, canvasSize, finalHash, composeFinal, calibrationStart, calibrationStop, calibrationRemainingMs, calibrationHash, calibrationImage } from './screen.js'
 import { seedBrand } from './brand.js'
 import { registerAuth, sessionUser, SSO_ENABLED, SSO_PARTIAL } from './auth.js'
 
@@ -69,7 +71,7 @@ app.get('/api/creations/:id', { preHandler: adminOnly }, async (req, reply) => {
 
 app.post('/api/creations', { preHandler: adminOnly }, async (req) => {
   const { name = 'Sans titre', scene, is_template = 0 } = req.body ?? {}
-  const sc = scene ?? { width: DEFAULT_W, height: DEFAULT_H, background: '#ffffff', layers: [] }
+  const sc = scene ?? { ...canvasSize(DEFAULT_W, DEFAULT_H, getSettings().margins), background: '#ffffff', layers: [] }
   const info = db.prepare('INSERT INTO creations (name, scene, is_template) VALUES (?, ?, ?)').run(name, JSON.stringify(sc), is_template ? 1 : 0)
   return creationRow(db.prepare('SELECT * FROM creations WHERE id = ?').get(info.lastInsertRowid))
 })
@@ -103,6 +105,7 @@ app.put('/api/creations/:id', { preHandler: adminOnly }, async (req, reply) => {
     is_template === undefined ? row.is_template : is_template ? 1 : 0,
     id
   )
+  if (png) notify(devicesUsing(id)) // l'image a changé : les écrans qui l'affichent se mettent à jour tout de suite
   return creationRow(db.prepare('SELECT * FROM creations WHERE id = ?').get(id))
 })
 
@@ -118,8 +121,10 @@ app.post('/api/creations/:id/duplicate', { preHandler: adminOnly }, async (req, 
 })
 
 app.delete('/api/creations/:id', { preHandler: adminOnly }, async (req) => {
+  const affected = devicesUsing(req.params.id)
   db.prepare('DELETE FROM creations WHERE id = ?').run(req.params.id)
   await unlink(pngPath(req.params.id)).catch(() => {})
+  notify(affected)
   return { ok: true }
 })
 
@@ -178,15 +183,50 @@ function resolveForDevice(device, nowMs = Date.now()) {
   const settings = getSettings()
   const items = slidesOf(device.id)
   const r = schedule(items, nowMs, settings.default_slide_seconds)
-  if (r.item) return { creationId: r.item.creation_id, hash: r.item.png_hash, slideId: r.item.id, activeCount: r.activeCount, nextChangeMs: r.nextChangeMs, items, settings }
+  const m = settings.margins
+  // Mire de calibrage demandée depuis le dashboard : elle remplace tout, le temps du réglage.
+  const cal = calibrationRemainingMs(nowMs)
+  if (cal > 0) return { creationId: 'calibration', hash: calibrationHash(device.width, device.height, m), slideId: null, activeCount: 0, nextChangeMs: cal, items, settings }
+  if (r.item) return { creationId: r.item.creation_id, hash: finalHash(r.item.png_hash, m), slideId: r.item.id, activeCount: r.activeCount, nextChangeMs: r.nextChangeMs, items, settings }
   const fb = settings.fallback_creation_id && db.prepare('SELECT id, png_hash FROM creations WHERE id = ?').get(settings.fallback_creation_id)
-  return { creationId: fb?.png_hash ? fb.id : null, hash: fb?.png_hash ?? null, slideId: null, activeCount: 0, nextChangeMs: r.nextChangeMs, items, settings }
+  return { creationId: fb?.png_hash ? fb.id : null, hash: fb?.png_hash ? finalHash(fb.png_hash, m) : null, slideId: null, activeCount: 0, nextChangeMs: r.nextChangeMs, items, settings }
 }
+
+// Écrans à prévenir quand une création change : ceux dont la playlist la contient (tous, si c'est le slide de repli).
+const allDeviceIds = () => db.prepare('SELECT id FROM devices').all().map((r) => r.id)
+const devicesUsing = (creationId) =>
+  getSettings().fallback_creation_id === Number(creationId)
+    ? allDeviceIds()
+    : db.prepare('SELECT DISTINCT device_id FROM playlist_items WHERE creation_id = ?').all(creationId).map((r) => r.device_id)
+
+// Nom de ce que l'écran affiche : on retrouve la création dont l'empreinte finale (avec marges) correspond.
+function shownName(device, r) {
+  if (!device.shown_hash) return null
+  if (device.shown_hash === calibrationHash(device.width, device.height, r.settings.margins)) return 'mire de calibrage'
+  const ids = new Set([...r.items.map((i) => i.creation_id), r.settings.fallback_creation_id].filter(Boolean))
+  for (const id of ids) {
+    const c = db.prepare('SELECT name, png_hash FROM creations WHERE id = ?').get(id)
+    if (c?.png_hash && finalHash(c.png_hash, r.settings.margins) === device.shown_hash) return c.name
+  }
+  return null
+}
+
+const ONLINE_WITHIN_MS = 120_000 // le Pi interroge au moins toutes les ~50 s en long-polling
+const seenAgo = (lastSeen) => (lastSeen ? Date.now() - Date.parse(lastSeen.replace(' ', 'T') + 'Z') : null)
 
 app.get('/api/devices', { preHandler: adminOnly }, async () =>
   db.prepare('SELECT * FROM devices ORDER BY id').all().map((d) => {
     const r = resolveForDevice(d)
-    return { ...d, slides: r.items, current_slide_id: r.slideId, current_creation_id: r.creationId }
+    const ago = seenAgo(d.last_seen)
+    return {
+      ...d,
+      slides: r.items,
+      current_slide_id: r.slideId,
+      current_creation_id: r.creationId,
+      online: ago !== null && ago < ONLINE_WITHIN_MS,
+      seen_ago_seconds: ago === null ? null : Math.round(ago / 1000),
+      shown_name: shownName(d, r),
+    }
   })
 )
 
@@ -203,6 +243,7 @@ app.patch('/api/devices/:id', { preHandler: adminOnly }, async (req, reply) => {
   if (!d) return reply.code(404).send({ error: 'not found' })
   const b = req.body ?? {}
   db.prepare('UPDATE devices SET name = ?, refresh_seconds = ? WHERE id = ?').run(b.name ?? d.name, b.refresh_seconds ?? d.refresh_seconds, d.id)
+  notify([d.id])
   return db.prepare('SELECT * FROM devices WHERE id = ?').get(d.id)
 })
 
@@ -249,6 +290,7 @@ app.post('/api/devices/:id/slides', { preHandler: adminOnly }, async (req, reply
   const info = db
     .prepare('INSERT INTO playlist_items (device_id, creation_id, position, duration_seconds, starts_at, ends_at, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)')
     .run(device.id, b.creation_id, pos, f.value.duration_seconds, f.value.starts_at, f.value.ends_at, f.value.enabled)
+  notify([device.id])
   return db.prepare('SELECT * FROM playlist_items WHERE id = ?').get(info.lastInsertRowid)
 })
 
@@ -259,11 +301,14 @@ app.patch('/api/slides/:id', { preHandler: adminOnly }, async (req, reply) => {
   if (f.error) return reply.code(400).send({ error: f.error })
   db.prepare('UPDATE playlist_items SET duration_seconds = ?, starts_at = ?, ends_at = ?, enabled = ? WHERE id = ?')
     .run(f.value.duration_seconds, f.value.starts_at, f.value.ends_at, f.value.enabled, cur.id)
+  notify([cur.device_id])
   return db.prepare('SELECT * FROM playlist_items WHERE id = ?').get(cur.id)
 })
 
 app.delete('/api/slides/:id', { preHandler: adminOnly }, async (req) => {
+  const row = db.prepare('SELECT device_id FROM playlist_items WHERE id = ?').get(req.params.id)
   db.prepare('DELETE FROM playlist_items WHERE id = ?').run(req.params.id)
+  if (row) notify([row.device_id])
   return { ok: true }
 })
 
@@ -276,11 +321,16 @@ app.put('/api/devices/:id/slides/order', { preHandler: adminOnly }, async (req, 
   }
   const upd = db.prepare('UPDATE playlist_items SET position = ? WHERE id = ?')
   ids.forEach((id, i) => upd.run(i, id))
+  notify([Number(req.params.id)])
   return { ok: true }
 })
 
 // ---------- options du dashboard ----------
-app.get('/api/settings', { preHandler: adminOnly }, async () => getSettings())
+const settingsView = () => {
+  const st = getSettings()
+  return { ...st, canvas: canvasSize(DEFAULT_W, DEFAULT_H, st.margins), screen: { width: DEFAULT_W, height: DEFAULT_H }, calibration_seconds_left: Math.ceil(calibrationRemainingMs() / 1000) }
+}
+app.get('/api/settings', { preHandler: adminOnly }, async () => settingsView())
 
 app.put('/api/settings', { preHandler: adminOnly }, async (req, reply) => {
   const b = req.body ?? {}
@@ -294,16 +344,56 @@ app.put('/api/settings', { preHandler: adminOnly }, async (req, reply) => {
     if (id !== null && !db.prepare('SELECT 1 FROM creations WHERE id = ?').get(id)) return reply.code(400).send({ error: 'création de repli introuvable' })
     setSetting('fallback_creation_id', id)
   }
-  return getSettings()
+  if ('margins' in b) {
+    const m = parseMargins(b.margins, getSettings().margins, DEFAULT_W, DEFAULT_H)
+    if (m.error) return reply.code(400).send({ error: m.error })
+    setSetting('margins', m.value)
+  }
+  notify(allDeviceIds())
+  return settingsView()
+})
+
+// Mire de calibrage sur les écrans (réglage des marges à l'œil). Temporaire : s'éteint seule.
+app.post('/api/calibration', { preHandler: adminOnly }, async (req, reply) => {
+  const { on, seconds = 900 } = req.body ?? {}
+  if (on) {
+    if (!Number.isInteger(seconds) || seconds < 1 || seconds > 3600) return reply.code(400).send({ error: 'durée : de 1 à 3600 secondes' })
+    calibrationStart(seconds)
+  } else calibrationStop()
+  notify(allDeviceIds())
+  return settingsView()
 })
 
 // ---------- API appelée par le Pi (token device) ----------
-// Le serveur choisit le slide du moment. Le Pi ne télécharge l'image que si le hash a changé, et revient dans
-// `next_check_seconds` (fin du créneau, ou `refresh_seconds` au plus pour récupérer les modifications du dashboard).
-app.get('/api/device/current', { preHandler: deviceOnly }, async (req) => {
+// Le serveur choisit le slide du moment. Le Pi ne télécharge l'image que si le hash a changé.
+// Long-polling : avec `?wait=<s>&v=<version>`, la réponse est retenue jusqu'à un changement envoyé par le dashboard,
+// la fin du créneau du slide, ou `wait` secondes (45 max : Cloudflare coupe à 100 s). Sans `v` (ou avec une version
+// périmée, ex. après un redémarrage du serveur) on répond tout de suite. `shown=<hash>` : ce que l'écran affiche.
+// Les anciens clients, qui ignorent `wait`, continuent de s'appuyer sur `next_check_seconds`.
+const MAX_WAIT_SECONDS = 45
+app.get('/api/device/current', { preHandler: deviceOnly }, async (req, reply) => {
+  const touch = (id, shown) => {
+    db.prepare("UPDATE devices SET last_seen = datetime('now') WHERE id = ?").run(id)
+    if (shown) db.prepare("UPDATE devices SET shown_hash = ?, shown_at = datetime('now') WHERE id = ? AND COALESCE(shown_hash, '') != ?").run(shown, id, shown)
+  }
+  const shown = typeof req.query?.shown === 'string' && /^[0-9a-f]{40}$/.test(req.query.shown) ? req.query.shown : null
+  const id = req.device.id
+  touch(id, shown)
+
+  let r = resolveForDevice(req.device)
+  const wait = Math.min(MAX_WAIT_SECONDS, Number(req.query?.wait) || 0)
+  const known = typeof req.query?.v === 'string' ? req.query.v : null
+  if (wait > 0 && known === versionOf(id)) {
+    const slotMs = Number.isFinite(r.nextChangeMs) ? r.nextChangeMs + 100 : Infinity
+    await waitForChange(id, known, Math.min(wait * 1000, slotMs), reply.raw)
+    if (reply.raw.destroyed) return reply // client parti : rien à renvoyer
+    const fresh = db.prepare('SELECT * FROM devices WHERE id = ?').get(id)
+    if (!fresh) return reply.code(401).send({ error: 'unauthorized' })
+    touch(id, null)
+    req.device = fresh
+    r = resolveForDevice(fresh)
+  }
   const d = req.device
-  db.prepare("UPDATE devices SET last_seen = datetime('now') WHERE id = ?").run(d.id)
-  const r = resolveForDevice(d)
   return {
     hash: r.hash,
     image_url: r.hash ? `/api/device/image?creation=${r.creationId}` : null,
@@ -313,6 +403,7 @@ app.get('/api/device/current', { preHandler: deviceOnly }, async (req) => {
     next_check_seconds: nextCheckSeconds(r.nextChangeMs, d.refresh_seconds),
     slide_id: r.slideId,
     slide_count: r.activeCount,
+    version: versionOf(id),
   }
 })
 
@@ -321,10 +412,16 @@ app.get('/api/device/current', { preHandler: deviceOnly }, async (req) => {
 app.get('/api/device/image', { preHandler: deviceOnly }, async (req, reply) => {
   const d = req.device
   const r = resolveForDevice(d)
+  const m = r.settings.margins
+  if (req.query?.creation === 'calibration') {
+    if (calibrationRemainingMs() <= 0) return reply.code(404).send({ error: 'no image' })
+    return reply.type('image/png').send(await calibrationImage(d.width, d.height, m))
+  }
   const wanted = req.query?.creation ? Number(req.query.creation) : r.creationId
   const allowed = new Set([...r.items.map((i) => i.creation_id), r.settings.fallback_creation_id].filter(Boolean))
   if (!wanted || !allowed.has(wanted) || !existsSync(pngPath(wanted))) return reply.code(404).send({ error: 'no image' })
-  return reply.type('image/png').send(await readFile(pngPath(wanted)))
+  const png_hash = db.prepare('SELECT png_hash FROM creations WHERE id = ?').get(wanted)?.png_hash
+  return reply.type('image/png').send(await composeFinal(await readFile(pngPath(wanted)), png_hash, m, d.width, d.height))
 })
 
 // ---------- dashboard (build Vite) ----------

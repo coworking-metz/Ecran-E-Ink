@@ -48,6 +48,7 @@ export const api = {
   deleteDevice: (id) => req('DELETE', `/api/devices/${id}`),
   settings: () => req('GET', '/api/settings'),
   saveSettings: (data) => req('PUT', '/api/settings', data),
+  setCalibration: (on, seconds) => req('POST', '/api/calibration', { on, ...(seconds ? { seconds } : {}) }),
   addSlide: (deviceId, data) => req('POST', `/api/devices/${deviceId}/slides`, data),
   patchSlide: (id, data) => req('PATCH', `/api/slides/${id}`, data),
   deleteSlide: (id) => req('DELETE', `/api/slides/${id}`),
