@@ -37,6 +37,12 @@ in_wait = False  # vrai pendant une requête de long-polling : un arrêt peut al
 last_draw = 0.0
 
 
+def retry_delay(failures):
+    """Attente avant de réessayer après `failures` échecs consécutifs : 5, 10, 20, 40… jusqu'à MAX_BACKOFF.
+    Court au début : un redémarrage du serveur (déploiement, 502) ne doit pas figer l'écran pendant une minute."""
+    return min(MAX_BACKOFF, 5 * 2 ** min(max(failures, 1) - 1, 10))
+
+
 def load_json(path, default=None):
     try:
         with open(path) as f:
@@ -197,12 +203,12 @@ def main():
         except urllib.error.HTTPError as e:
             version = None
             failures += 1
-            delay = min(MAX_BACKOFF, 30 * 2 ** min(failures, 5))
+            delay = retry_delay(failures)
             log.error('API : HTTP %s%s (nouvel essai dans %ss)', e.code, ' : jeton refusé ?' if e.code == 401 else '', delay)
         except Exception as e:  # réseau coupé, contrôleur absent… : on réessaie, on ne meurt pas
             version = None
             failures += 1
-            delay = min(MAX_BACKOFF, 30 * 2 ** min(failures, 5))
+            delay = retry_delay(failures)
             log.error('%s : %s (nouvel essai dans %ss)', type(e).__name__, e, delay)
         if args.once:
             return

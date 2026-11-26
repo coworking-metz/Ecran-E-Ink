@@ -15,3 +15,4 @@ jobs:
       - run: npm ci
       - run: python3 -m pip install pillow # test du client Pi (pi/client.py) avec un faux pilote d'écran
       - run: npm run check
+      - run: python3 -m unittest discover pi/tests
