@@ -76,12 +76,11 @@ Voir le dashboard sans navigateur ouvert : `npm run screenshot -- /devices out.p
 - Les polices ne sont pas dans le dépôt : à copier à la main dans `admin/public/fonts/` **avant** le build (Vite les embarque dans `dist`).
 
 ## À faire
-1. **Matériel** : flasher une carte SD (Raspberry Pi OS Lite 32-bit), activer SPI, brancher HAT + dalle (Pi éteint), installer la lib IT8951, `pi/test_display.py` (1200×825, VCOM -1.81, mire de gris + texte), mesurer les temps de refresh (GC16 qualité vs DU rapide).
-2. Écrire le **client Pi** (`pi/client.py`, config fichier : URL, token, VCOM, rotation ; `install.sh` ; service systemd ; reprise après coupure réseau).
-3. Tester l'éditeur à la souris, et la connexion SSO de bout en bout avec un vrai compte.
-4. Déployer le backend (HTTPS, `PUBLIC_URL` de production à enregistrer comme redirect URI côté WordPress).
-5. Plus tard : rendu serveur/widgets dynamiques, plusieurs écrans, planning de contenu.
+1. **Écran** : confirmer l'affichage à l'œil (`pi/test_display.py` validé côté logiciel : dalle 1200×825, VCOM -1.81, GC16 ≈ 1,3 s), installer le service (`pi/install-service.sh`), tester un cycle complet avec plusieurs slides, mesurer le mode rapide (DU) si besoin.
+2. Valider `pi/client.py` sur le matériel réel (testé jusqu'ici contre un serveur local avec un faux pilote, et contre la prod depuis le Pi pour l'API).
+3. Tester l'éditeur à la souris (déplacement, redimensionnement, rotation).
+4. Sauvegarde planifiée de la prod (`scripts/backup.sh` en cron), SSH du Pi par clé seulement.
+5. Plus tard : rendu serveur/widgets dynamiques (heure, météo), plusieurs écrans avec contenus différents, récurrence des slides (ex. « chaque premier jeudi »).
 
-## Questions ouvertes
-- Hébergement du backend.
+## Question ouverte
 - Orientation : paysage (natif 1200×825) ou portrait (rotation logicielle).
