@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
 import { api } from './api.js'
+import Playlist from './Playlist.jsx'
 
 export default function Devices() {
   const [devices, setDevices] = useState(null)
   const [creations, setCreations] = useState([])
-  const load = () => Promise.all([api.devices(), api.creations()]).then(([d, c]) => { setDevices(d); setCreations(c) })
+  const [settings, setSettings] = useState({ default_slide_seconds: 120 })
+  const load = () => Promise.all([api.devices(), api.creations(), api.settings()]).then(([d, c, s]) => { setDevices(d); setCreations(c); setSettings(s) })
   useEffect(() => { load() }, [])
 
   // Création immédiate : le nom se modifie ensuite directement dans la carte.
@@ -13,7 +15,6 @@ export default function Devices() {
     load()
   }
   const rename = async (d, name) => { if (name.trim() && name !== d.name) { await api.patchDevice(d.id, { name: name.trim() }); load() } }
-  const assign = async (d, creation_id) => { await api.patchDevice(d.id, { creation_id: creation_id ? Number(creation_id) : null }); load() }
   const setRefresh = async (d, v) => { await api.patchDevice(d.id, { refresh_seconds: Number(v) }); load() }
   const remove = async (d) => { if (confirm(`Supprimer « ${d.name} » ?`)) { await api.deleteDevice(d.id); load() } }
 
@@ -34,15 +35,9 @@ export default function Devices() {
                 <button className="danger" onClick={() => remove(d)}>Supprimer</button>
               </div>
               <div className="form">
-                <label>Création affichée
-                  <select value={d.creation_id ?? ''} onChange={(e) => assign(d, e.target.value)}>
-                    <option value="">— aucune —</option>
-                    {creations.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                  </select>
-                </label>
-                <label>Rafraîchissement
+                <label>Vérifie les modifications toutes les
                   <select value={d.refresh_seconds} onChange={(e) => setRefresh(d, e.target.value)}>
-                    {[[60, '1 min'], [300, '5 min'], [900, '15 min'], [1800, '30 min'], [3600, '1 h'], [21600, '6 h']].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                    {[[60, '1 min'], [300, '5 min'], [900, '15 min'], [1800, '30 min'], [3600, '1 h']].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                   </select>
                 </label>
                 <label>Résolution<input value={`${d.width} × ${d.height}`} readOnly /></label>
@@ -51,6 +46,7 @@ export default function Devices() {
                   <input value={d.token} readOnly onFocus={(e) => e.target.select()} />
                 </label>
               </div>
+              <Playlist device={d} creations={creations} defaultSeconds={settings.default_slide_seconds} onChange={load} />
             </div>
           ))}
         </div>

@@ -16,9 +16,10 @@ const freePort = () =>
     s.on('error', reject)
   })
 
-export async function startServer(env = {}) {
+export async function startServer(env = {}, { setup } = {}) {
   const port = await freePort()
   const dataDir = mkdtempSync(join(tmpdir(), 'eink-test-'))
+  if (setup) await setup(dataDir) // ex. pré-remplir une base d'ancien schéma
   let log = ''
   const child = spawn(process.execPath, ['server/src/index.js'], {
     cwd: ROOT,

@@ -7,7 +7,8 @@ import { existsSync } from 'node:fs'
 import { readFile, writeFile, unlink, copyFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { db, CREATIONS_DIR, ASSETS_DIR } from './db.js'
+import { db, CREATIONS_DIR, ASSETS_DIR, getSettings, setSetting } from './db.js'
+import { schedule, nextCheckSeconds, MIN_SLIDE_SECONDS } from './playlist.js'
 import { seedBrand } from './brand.js'
 import { registerAuth, sessionUser, SSO_ENABLED, SSO_PARTIAL } from './auth.js'
 
@@ -165,12 +166,28 @@ await app.register(fastifyStatic, { root: ASSETS_DIR, prefix: '/assets/', decora
 // ---------- devices (admin) ----------
 const newToken = () => randomBytes(24).toString('hex')
 
-app.get('/api/devices', { preHandler: adminOnly }, async () =>
+const slidesOf = (deviceId) =>
   db.prepare(`
-    SELECT d.*, c.name AS creation_name, c.png_hash AS creation_hash
-    FROM devices d LEFT JOIN creations c ON c.id = d.creation_id
-    ORDER BY d.id
-  `).all()
+    SELECT p.*, c.name AS creation_name, c.png_hash
+    FROM playlist_items p JOIN creations c ON c.id = p.creation_id
+    WHERE p.device_id = ? ORDER BY p.position, p.id
+  `).all(deviceId)
+
+// Quel slide cet écran doit-il montrer maintenant ? (slide de repli des options si aucun n'est actif)
+function resolveForDevice(device, nowMs = Date.now()) {
+  const settings = getSettings()
+  const items = slidesOf(device.id)
+  const r = schedule(items, nowMs, settings.default_slide_seconds)
+  if (r.item) return { creationId: r.item.creation_id, hash: r.item.png_hash, slideId: r.item.id, activeCount: r.activeCount, nextChangeMs: r.nextChangeMs, items, settings }
+  const fb = settings.fallback_creation_id && db.prepare('SELECT id, png_hash FROM creations WHERE id = ?').get(settings.fallback_creation_id)
+  return { creationId: fb?.png_hash ? fb.id : null, hash: fb?.png_hash ?? null, slideId: null, activeCount: 0, nextChangeMs: r.nextChangeMs, items, settings }
+}
+
+app.get('/api/devices', { preHandler: adminOnly }, async () =>
+  db.prepare('SELECT * FROM devices ORDER BY id').all().map((d) => {
+    const r = resolveForDevice(d)
+    return { ...d, slides: r.items, current_slide_id: r.slideId, current_creation_id: r.creationId }
+  })
 )
 
 app.post('/api/devices', { preHandler: adminOnly }, async (req) => {
@@ -185,12 +202,7 @@ app.patch('/api/devices/:id', { preHandler: adminOnly }, async (req, reply) => {
   const d = db.prepare('SELECT * FROM devices WHERE id = ?').get(req.params.id)
   if (!d) return reply.code(404).send({ error: 'not found' })
   const b = req.body ?? {}
-  db.prepare('UPDATE devices SET name = ?, refresh_seconds = ?, creation_id = ? WHERE id = ?').run(
-    b.name ?? d.name,
-    b.refresh_seconds ?? d.refresh_seconds,
-    'creation_id' in b ? b.creation_id : d.creation_id,
-    d.id
-  )
+  db.prepare('UPDATE devices SET name = ?, refresh_seconds = ? WHERE id = ?').run(b.name ?? d.name, b.refresh_seconds ?? d.refresh_seconds, d.id)
   return db.prepare('SELECT * FROM devices WHERE id = ?').get(d.id)
 })
 
@@ -199,25 +211,120 @@ app.delete('/api/devices/:id', { preHandler: adminOnly }, async (req) => {
   return { ok: true }
 })
 
+// ---------- playlist (admin) ----------
+// Une date vide = pas de limite. Les dates sont stockées en ISO 8601 UTC ; le dashboard convertit depuis l'heure locale.
+const parseDate = (v) => {
+  if (v === null || v === undefined || v === '') return { ok: true, value: null }
+  const t = Date.parse(v)
+  return Number.isNaN(t) ? { ok: false } : { ok: true, value: new Date(t).toISOString() }
+}
+function slideFields(b, current = {}) {
+  const out = { duration_seconds: current.duration_seconds ?? null, starts_at: current.starts_at ?? null, ends_at: current.ends_at ?? null, enabled: current.enabled ?? 1 }
+  if ('duration_seconds' in b) {
+    const d = b.duration_seconds
+    if (d === null || d === '') out.duration_seconds = null
+    else if (Number.isInteger(d) && d >= MIN_SLIDE_SECONDS && d <= 86400) out.duration_seconds = d
+    else return { error: `durée : un entier entre ${MIN_SLIDE_SECONDS} et 86400 secondes` }
+  }
+  for (const k of ['starts_at', 'ends_at']) {
+    if (k in b) {
+      const p = parseDate(b[k])
+      if (!p.ok) return { error: `${k} : date invalide` }
+      out[k] = p.value
+    }
+  }
+  if (out.starts_at && out.ends_at && Date.parse(out.ends_at) <= Date.parse(out.starts_at)) return { error: 'la fin doit être après le début' }
+  if ('enabled' in b) out.enabled = b.enabled ? 1 : 0
+  return { value: out }
+}
+
+app.post('/api/devices/:id/slides', { preHandler: adminOnly }, async (req, reply) => {
+  const device = db.prepare('SELECT id FROM devices WHERE id = ?').get(req.params.id)
+  const b = req.body ?? {}
+  if (!device) return reply.code(404).send({ error: 'écran introuvable' })
+  if (!db.prepare('SELECT 1 FROM creations WHERE id = ?').get(b.creation_id)) return reply.code(400).send({ error: 'création introuvable' })
+  const f = slideFields(b)
+  if (f.error) return reply.code(400).send({ error: f.error })
+  const pos = db.prepare('SELECT COALESCE(MAX(position) + 1, 0) AS p FROM playlist_items WHERE device_id = ?').get(device.id).p
+  const info = db
+    .prepare('INSERT INTO playlist_items (device_id, creation_id, position, duration_seconds, starts_at, ends_at, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(device.id, b.creation_id, pos, f.value.duration_seconds, f.value.starts_at, f.value.ends_at, f.value.enabled)
+  return db.prepare('SELECT * FROM playlist_items WHERE id = ?').get(info.lastInsertRowid)
+})
+
+app.patch('/api/slides/:id', { preHandler: adminOnly }, async (req, reply) => {
+  const cur = db.prepare('SELECT * FROM playlist_items WHERE id = ?').get(req.params.id)
+  if (!cur) return reply.code(404).send({ error: 'slide introuvable' })
+  const f = slideFields(req.body ?? {}, cur)
+  if (f.error) return reply.code(400).send({ error: f.error })
+  db.prepare('UPDATE playlist_items SET duration_seconds = ?, starts_at = ?, ends_at = ?, enabled = ? WHERE id = ?')
+    .run(f.value.duration_seconds, f.value.starts_at, f.value.ends_at, f.value.enabled, cur.id)
+  return db.prepare('SELECT * FROM playlist_items WHERE id = ?').get(cur.id)
+})
+
+app.delete('/api/slides/:id', { preHandler: adminOnly }, async (req) => {
+  db.prepare('DELETE FROM playlist_items WHERE id = ?').run(req.params.id)
+  return { ok: true }
+})
+
+// Corps : { ids: [id de slide, dans le nouvel ordre] } ; doit contenir exactement les slides de l'écran.
+app.put('/api/devices/:id/slides/order', { preHandler: adminOnly }, async (req, reply) => {
+  const have = db.prepare('SELECT id FROM playlist_items WHERE device_id = ?').all(req.params.id).map((r) => r.id).sort((a, b) => a - b)
+  const ids = req.body?.ids
+  if (!Array.isArray(ids) || JSON.stringify([...ids].sort((a, b) => a - b)) !== JSON.stringify(have)) {
+    return reply.code(400).send({ error: "la liste doit contenir exactement les slides de l'écran" })
+  }
+  const upd = db.prepare('UPDATE playlist_items SET position = ? WHERE id = ?')
+  ids.forEach((id, i) => upd.run(i, id))
+  return { ok: true }
+})
+
+// ---------- options du dashboard ----------
+app.get('/api/settings', { preHandler: adminOnly }, async () => getSettings())
+
+app.put('/api/settings', { preHandler: adminOnly }, async (req, reply) => {
+  const b = req.body ?? {}
+  if ('default_slide_seconds' in b) {
+    const d = b.default_slide_seconds
+    if (!Number.isInteger(d) || d < MIN_SLIDE_SECONDS || d > 86400) return reply.code(400).send({ error: `durée par défaut : un entier entre ${MIN_SLIDE_SECONDS} et 86400 secondes` })
+    setSetting('default_slide_seconds', d)
+  }
+  if ('fallback_creation_id' in b) {
+    const id = b.fallback_creation_id
+    if (id !== null && !db.prepare('SELECT 1 FROM creations WHERE id = ?').get(id)) return reply.code(400).send({ error: 'création de repli introuvable' })
+    setSetting('fallback_creation_id', id)
+  }
+  return getSettings()
+})
+
 // ---------- API appelée par le Pi (token device) ----------
-// Renvoie le hash de l'image à afficher ; le Pi ne télécharge l'image que si le hash a changé.
+// Le serveur choisit le slide du moment. Le Pi ne télécharge l'image que si le hash a changé, et revient dans
+// `next_check_seconds` (fin du créneau, ou `refresh_seconds` au plus pour récupérer les modifications du dashboard).
 app.get('/api/device/current', { preHandler: deviceOnly }, async (req) => {
   const d = req.device
   db.prepare("UPDATE devices SET last_seen = datetime('now') WHERE id = ?").run(d.id)
-  const c = d.creation_id ? db.prepare('SELECT id, png_hash FROM creations WHERE id = ?').get(d.creation_id) : null
+  const r = resolveForDevice(d)
   return {
-    hash: c?.png_hash ?? null,
-    image_url: c?.png_hash ? '/api/device/image' : null,
+    hash: r.hash,
+    image_url: r.hash ? `/api/device/image?creation=${r.creationId}` : null,
     width: d.width,
     height: d.height,
     refresh_seconds: d.refresh_seconds,
+    next_check_seconds: nextCheckSeconds(r.nextChangeMs, d.refresh_seconds),
+    slide_id: r.slideId,
+    slide_count: r.activeCount,
   }
 })
 
+// L'image demandée doit appartenir à la playlist de l'écran (ou être le slide de repli) : un jeton d'écran
+// ne donne pas accès aux autres créations.
 app.get('/api/device/image', { preHandler: deviceOnly }, async (req, reply) => {
   const d = req.device
-  if (!d.creation_id || !existsSync(pngPath(d.creation_id))) return reply.code(404).send({ error: 'no image' })
-  return reply.type('image/png').send(await readFile(pngPath(d.creation_id)))
+  const r = resolveForDevice(d)
+  const wanted = req.query?.creation ? Number(req.query.creation) : r.creationId
+  const allowed = new Set([...r.items.map((i) => i.creation_id), r.settings.fallback_creation_id].filter(Boolean))
+  if (!wanted || !allowed.has(wanted) || !existsSync(pngPath(wanted))) return reply.code(404).send({ error: 'no image' })
+  return reply.type('image/png').send(await readFile(pngPath(wanted)))
 })
 
 // ---------- dashboard (build Vite) ----------

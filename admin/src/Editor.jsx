@@ -192,13 +192,19 @@ export default function Editor({ id }) {
     } catch (e) { setStatus(`Erreur : ${e.message}`) }
   }, [id, name, scene, scale, isTemplate])
 
+  // Ajoute la création à la playlist de l'écran (sans doublon). Durée et dates se règlent dans la page Écrans.
   const publish = async (deviceId) => {
     if (!deviceId) return
     const saved = await save()
     if (!saved) return
-    await api.patchDevice(deviceId, { creation_id: Number(id) })
+    const dev = devices.find((d) => d.id === Number(deviceId))
+    if (dev?.slides.some((s) => s.creation_id === Number(id))) {
+      setStatus('Déjà dans la playlist de cet écran (réglages dans la page Écrans)')
+      return
+    }
+    await api.addSlide(deviceId, { creation_id: Number(id) })
     api.devices().then(setDevices)
-    setStatus('Publié sur l’écran ✓ (il se mettra à jour à son prochain passage)')
+    setStatus('Ajouté à la playlist ✓ (l’écran le prendra en compte à son prochain passage)')
   }
 
   const downloadPng = () => {
@@ -264,8 +270,8 @@ export default function Editor({ id }) {
         <label className="check"><input type="checkbox" checked={preview} onChange={(e) => setPreview(e.target.checked)} /> Aperçu e-ink</label>
         <button onClick={downloadPng}>Exporter PNG</button>
         <select value="" onChange={(e) => publish(e.target.value)}>
-          <option value="">Publier sur…</option>
-          {devices.map((d) => <option key={d.id} value={d.id}>{d.name}{d.creation_id === Number(id) ? ' (actuel)' : ''}</option>)}
+          <option value="">Ajouter à la playlist de…</option>
+          {devices.map((d) => <option key={d.id} value={d.id}>{d.name}{d.slides.some((s) => s.creation_id === Number(id)) ? ' (déjà dedans)' : ''}</option>)}
         </select>
         <button className="primary" onClick={save}>Enregistrer</button>
       </header>

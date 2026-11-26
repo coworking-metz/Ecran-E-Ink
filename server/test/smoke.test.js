@@ -46,12 +46,12 @@ test("contrat du Pi : l'image publiée est un PNG en niveaux de gris à la taill
   const c = await (await api('POST', '/api/creations', { name: 'x' })).json()
   const png = (await sharp({ create: { width: 40, height: 30, channels: 3, background: '#c03030' } }).png().toBuffer()).toString('base64')
   await api('PUT', `/api/creations/${c.id}`, { png: `data:image/png;base64,${png}` })
-  await api('PATCH', `/api/devices/${dev.id}`, { creation_id: c.id })
+  await api('POST', `/api/devices/${dev.id}/slides`, { creation_id: c.id })
   const devAuth = { Authorization: `Bearer ${dev.token}` }
 
   const cur = await (await fetch(srv.base + '/api/device/current', { headers: devAuth })).json()
   assert.match(cur.hash, /^[0-9a-f]{40}$/)
-  assert.equal(cur.image_url, '/api/device/image')
+  assert.equal(cur.image_url, `/api/device/image?creation=${c.id}`)
 
   const buf = Buffer.from(await (await fetch(srv.base + cur.image_url, { headers: devAuth })).arrayBuffer())
   assert.equal(buf.readUInt32BE(16), 1200, 'largeur')

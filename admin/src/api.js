@@ -46,6 +46,12 @@ export const api = {
   createDevice: (data) => req('POST', '/api/devices', data),
   patchDevice: (id, data) => req('PATCH', `/api/devices/${id}`, data),
   deleteDevice: (id) => req('DELETE', `/api/devices/${id}`),
+  settings: () => req('GET', '/api/settings'),
+  saveSettings: (data) => req('PUT', '/api/settings', data),
+  addSlide: (deviceId, data) => req('POST', `/api/devices/${deviceId}/slides`, data),
+  patchSlide: (id, data) => req('PATCH', `/api/slides/${id}`, data),
+  deleteSlide: (id) => req('DELETE', `/api/slides/${id}`),
+  reorderSlides: (deviceId, ids) => req('PUT', `/api/devices/${deviceId}/slides/order`, { ids }),
 }
 
 // Les <img> ne peuvent pas envoyer d'en-tête Authorization : on passe par fetch + blob.

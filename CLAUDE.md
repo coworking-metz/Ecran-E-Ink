@@ -35,9 +35,9 @@ Config : copier `.env.example` en `.env`. Le port se règle avec `EINK_PORT` (et
 Sans SSO, `ADMIN_PASSWORD` est le mot de passe admin (défaut `admin` avec un avertissement au démarrage).
 
 ### API
-Admin (session SSO, ou Bearer = mot de passe sans SSO) : `GET|POST /api/creations` ; `GET|PUT|DELETE /api/creations/:id` (PUT accepte `{name, scene, png: dataURL, is_template}`) ; `POST /api/creations/:id/duplicate` ; `GET /api/creations/:id/image` ; `GET|POST /api/assets` (multipart) ; `DELETE /api/assets/:id` ; `GET|POST /api/devices` ; `PATCH|DELETE /api/devices/:id` (`creation_id`, `refresh_seconds`, `name`).
+Admin (session SSO, ou Bearer = mot de passe sans SSO) : `GET|POST /api/creations` ; `GET|PUT|DELETE /api/creations/:id` (PUT accepte `{name, scene, png: dataURL, is_template}`) ; `POST /api/creations/:id/duplicate` ; `GET /api/creations/:id/image` ; `GET|POST /api/assets` (multipart) ; `DELETE /api/assets/:id` ; `GET|POST /api/devices` ; `PATCH|DELETE /api/devices/:id` (`refresh_seconds`, `name`) ; playlist : `POST /api/devices/:id/slides`, `PATCH|DELETE /api/slides/:id`, `PUT /api/devices/:id/slides/order` ; `GET|PUT /api/settings`.
 Auth : `GET /api/auth/config`, `GET /api/auth/me`, `POST /api/auth/logout`, `GET /api/auth/login` et `GET /api/auth/callback` (SSO), `POST /api/login` (mot de passe, désactivé en SSO).
-Pi (Bearer = token du device) : `GET /api/device/current` → `{hash, image_url, width, height, refresh_seconds}` (met à jour `last_seen`) ; `GET /api/device/image` → PNG.
+Pi (Bearer = token du device) : `GET /api/device/current` → `{hash, image_url, next_check_seconds, slide_id, slide_count, …}` (met à jour `last_seen`) ; `GET /api/device/image?creation=<id>` → PNG (limité aux créations de la playlist de l'écran).
 
 ### SSO WordPress (`server/src/auth.js`)
 - Flux **Authorization Code + PKCE (S256), client public sans secret**, entièrement côté serveur : les jetons WordPress ne vont jamais au navigateur, qui ne reçoit qu'un cookie de session signé (HMAC-SHA256, `HttpOnly`, `SameSite=Lax`, `Secure` en HTTPS, 7 jours par défaut).
@@ -45,12 +45,19 @@ Pi (Bearer = token du device) : `GET /api/device/current` → `{hash, image_url,
 - Variables : `WP_URL`, `WP_CLIENT_ID`, `PUBLIC_URL` (URL de l'admin vue par le navigateur), `SESSION_SECRET` (`openssl rand -hex 32`), `SSO_ALLOWED_ROLES` (défaut `admin`, rôles renvoyés par `/oauth/me`), `SESSION_DAYS`. Si `WP_URL`, `WP_CLIENT_ID` et `SESSION_SECRET` sont tous définis, le SSO est actif et la connexion par mot de passe est désactivée.
 - Le serveur vérifie `state` (anti-CSRF de connexion), envoie le défi PKCE, puis contrôle les rôles de l'utilisateur avant d'ouvrir la session.
 
+### Playlist (`server/src/playlist.js`)
+- Un écran a une **playlist** de slides (`playlist_items` : création, position, durée, début, fin, actif). Les slides actifs défilent dans l'ordre, chacun pendant sa durée (propre au slide, sinon `default_slide_seconds` des options ; plancher 30 s pour ménager l'e-ink).
+- **Le serveur choisit le slide du moment**, le Pi reste simple : rotation alignée sur l'horloge (`epoch mod durée totale`), donc sans état, identique pour tous les écrans, et qui survit aux redémarrages. `next_check_seconds` = fin du créneau (ou prochain début/fin de période), plafonné par `refresh_seconds` du device pour que les modifications du dashboard arrivent.
+- Dates en ISO UTC en base, saisies en heure locale dans le dashboard (`admin/src/dates.js`) ; la fin est exclusive.
+- Aucun slide actif : le **slide de repli** des options (`fallback_creation_id`), sinon l'écran garde sa dernière image.
+- L'ancien modèle (une création par écran, `devices.creation_id`) est migré au démarrage en premier slide ; la colonne n'est plus utilisée.
+
 ### Dashboard
-Pages : Créations (créations + templates, aperçus), Éditeur, Écrans (token, création affichée, intervalle de refresh, dernier passage).
-Éditeur : calques texte, image, forme et QR ; déplacement/redimensionnement/rotation, ordre, duplication, suppression, flèches/Suppr/Ctrl+S, aperçu e-ink en niveaux de gris, export PNG, « Publier sur… » un écran.
+Pages : Créations (créations + templates, aperçus), Éditeur, Écrans (token, playlist, dernier passage), Options (durée par défaut, slide de repli).
+Éditeur : calques texte, image, forme et QR ; déplacement/redimensionnement/rotation, ordre, duplication, suppression, flèches/Suppr/Ctrl+S, aperçu e-ink en niveaux de gris, export PNG, « Ajouter à la playlist de… » un écran.
 Scène JSON : `{width, height, background, form?:{fields}, layers:[{id,type:'text'|'image'|'rect'|'qr',x,y,width,rotation,opacity,...}]}`.
 Pas de `prompt()` à la création : une création/un écran se crée directement avec un nom par défaut, modifiable ensuite.
-Vérifié en navigateur headless (rendu) ; l'interaction à la souris (drag, redimensionnement) n'a pas été testée.
+Voir le dashboard sans navigateur ouvert : `npm run screenshot -- /devices out.png --seed demo` (serveur jetable + Chrome headless). L'interaction à la souris (drag, redimensionnement) n'a pas été testée.
 
 ## Charte, polices, templates
 - Palette : jaune `#EAB234`, vert-noir `#374140`, noir `#2A2C2B`, bleu `#2962FF`, crème `#F7E0AE`. Le jaune devient un gris clair sur l'écran : l'utiliser en aplats, jamais en texte fin.
