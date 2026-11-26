@@ -62,6 +62,13 @@ Vérifié en navigateur headless (rendu) ; l'interaction à la souris (drag, red
 - **Calque QR** : généré dans le navigateur (`qrcode`), noir sur blanc, à la taille exacte du calque.
 - `npm run build` : le bundle Vite est dans `admin/dist/app/` (et non `assets/`, dossier des images importées servi par le serveur : collision corrigée).
 
+## Déploiement (production)
+- **pm2** : `ecosystem.config.cjs` (un seul process en mode fork : SQLite ne se met pas en cluster). Node >= 22 requis ; si le Node système est plus ancien, installer Node 22 à côté et lancer avec `EINK_NODE=<chemin du node 22>`. Piège : `npm` relance `node` via le `PATH`, donc préfixer le `PATH` avec le dossier `bin` de Node 22 (le script le fait).
+- **Mise à jour** : `./scripts/deploy.sh` sur le serveur (sauvegarde optionnelle si `EINK_BACKUP_DIR` est défini, `git pull --ff-only`, `npm ci`, build, `pm2 startOrReload`, `pm2 save`).
+- **Reverse proxy** : l'app écoute sur `127.0.0.1:<EINK_PORT>` (défaut `127.0.0.1`, `EINK_HOST` pour changer) ; ne jamais l'exposer directement. Apache : `ProxyPass / http://127.0.0.1:<port>/` avec `ProxyPreserveHost On` et `ProxyPass /.well-known/acme-challenge !` pour certbot ; HTTPS obligatoire (cookie de session `Secure`, `PUBLIC_URL` en https).
+- **Données** : une base SQLite (`eink.db`, mode WAL) + des images (`creations/<id>.png`, `assets/<id>.png`) dans `DATA_DIR` (défaut `server/data`). En production, mettre `DATA_DIR` **hors du dépôt**. Sauvegarde cohérente : `./scripts/backup.sh <dossier>` (`VACUUM INTO`, un `cp` de la base pendant que l'app tourne peut être incohérent à cause du WAL).
+- Les polices ne sont pas dans le dépôt : à copier à la main dans `admin/public/fonts/` **avant** le build (Vite les embarque dans `dist`).
+
 ## À faire
 1. **Matériel** : flasher une carte SD (Raspberry Pi OS Lite 32-bit), activer SPI, brancher HAT + dalle (Pi éteint), installer la lib IT8951, `pi/test_display.py` (1200×825, VCOM -1.81, mire de gris + texte), mesurer les temps de refresh (GC16 qualité vs DU rapide).
 2. Écrire le **client Pi** (`pi/client.py`, config fichier : URL, token, VCOM, rotation ; `install.sh` ; service systemd ; reprise après coupure réseau).
