@@ -35,8 +35,7 @@ Config : copier `.env.example` en `.env`. Le port se règle avec `EINK_PORT` (et
 Sans SSO, `ADMIN_PASSWORD` est le mot de passe admin (défaut `admin` avec un avertissement au démarrage).
 
 ### API
-Admin (session SSO, ou Bearer = mot de passe sans SSO) : `GET|POST /api/creations` ; `GET|PUT|DELETE /api/creations/:id` (PUT accepte `{name, scene, png: dataURL, is_template}`) ; `POST /api/creations/:id/duplicate` ; `GET /api/creations/:id/image` ; `GET|POST /api/assets` (multipart) ; `DELETE /api/assets/:id` ; `GET|POST /api/devices` ; `PATCH|DELETE /api/devices/:id` (`refresh_seconds`, `name`) ; playlist : `POST /api/devices/:id/slides`, `PATCH|DELETE /api/slides/:id`, `PUT /api/devices/:id/slides/order` ; `GET|PUT /api/settings`.
-Auth : `GET /api/auth/config`, `GET /api/auth/me`, `POST /api/auth/logout`, `GET /api/auth/login` et `GET /api/auth/callback` (SSO), `POST /api/login` (mot de passe, désactivé en SSO).
+Routes : `server/src/index.js` (`adminOnly` = session SSO, ou mot de passe en Bearer si le SSO n'est pas configuré ; `deviceOnly` = jeton d'écran).
 Pi (Bearer = token du device) : `GET /api/device/current` → `{hash, image_url, next_check_seconds, slide_id, slide_count, …}` (met à jour `last_seen`) ; `GET /api/device/image?creation=<id>` → PNG (limité aux créations de la playlist de l'écran).
 
 ### SSO WordPress (`server/src/auth.js`)
@@ -63,7 +62,6 @@ Voir le dashboard sans navigateur ouvert : `npm run screenshot -- /devices out.p
 - Palette : jaune `#EAB234`, vert-noir `#374140`, noir `#2A2C2B`, bleu `#2962FF`, crème `#F7E0AE`. Le jaune devient un gris clair sur l'écran : l'utiliser en aplats, jamais en texte fin.
 - **Polices** : Eveleth Clean (titres), Eveleth Clean Thin (texte), Andalusia (script du logo), Blida (Light/Medium/Heavy), Track (+Italic), Aldo the Apache (**sans accents**). Déclarées dans `admin/src/styles.css`, listées dans `admin/src/fonts.js`, chargées avant le rendu du canvas. **Les fichiers de police ne sont PAS dans le dépôt** (copyright « All rights reserved », pas de licence de redistribution) : `admin/public/fonts/` est ignoré par git, voir le README de ce dossier. Sans eux, l'éditeur retombe sur une police système.
 - **Templates** : `server/src/templates.js` (14 templates, textes d'exemple en lorem ipsum), semés dans la base au démarrage par `server/src/brand.js` (idempotent). Un template livré **non modifié** est mis à jour automatiquement si le code change (empreinte `template_hash`) ; un template retouché n'est jamais écrasé. Colonnes : `creations.is_template/template_key/template_hash`, `assets.brand_key`.
-- **Liste** : accueil, événement, petit déjeuner, annonce sombre, infos pratiques (Wi-Fi/horaires), agenda de la semaine, message sur fresque, avis de recherche, logo plein écran (veille), consigne du lieu, QR code d'action, BBQ / événement avec participation, journée collective + QR, merci/bravo.
 - **Aperçus** : les templates livrés n'ont pas d'image au départ ; la page Créations les rend côté navigateur (`renderScenePng`, même moteur Konva que l'éditeur) puis les enregistre.
 - **Mode formulaire** : un template déclare des champs (`scene.form.fields` : text/textarea/date/time) et lie des calques texte/QR via `bind: {tpl, upper}` (ex. `{date|long} {time|des}`). Formats : long, weekdayShort, day, time, des (`admin/src/form.js`). La taille du texte se réduit automatiquement (`fit: {lines, min}`). L'éditeur s'ouvre en mode Formulaire (saisie + aperçu en direct) avec bascule vers le mode Calques ; un calque lié peut être « détaché ».
 - **Calque QR** : généré dans le navigateur (`qrcode`), noir sur blanc, à la taille exacte du calque.
@@ -74,6 +72,7 @@ Voir le dashboard sans navigateur ouvert : `npm run screenshot -- /devices out.p
 - **Mise à jour** : `./scripts/deploy.sh` sur le serveur (sauvegarde optionnelle si `EINK_BACKUP_DIR` est défini, `git pull --ff-only`, `npm ci`, build, `pm2 startOrReload`, `pm2 save`).
 - **Reverse proxy** : l'app écoute sur `127.0.0.1:<EINK_PORT>` (défaut `127.0.0.1`, `EINK_HOST` pour changer) ; ne jamais l'exposer directement. Apache : `ProxyPass / http://127.0.0.1:<port>/` avec `ProxyPreserveHost On` et `ProxyPass /.well-known/acme-challenge !` pour certbot ; HTTPS obligatoire (cookie de session `Secure`, `PUBLIC_URL` en https).
 - **Données** : une base SQLite (`eink.db`, mode WAL) + des images (`creations/<id>.png`, `assets/<id>.png`) dans `DATA_DIR` (défaut `server/data`). En production, mettre `DATA_DIR` **hors du dépôt**. Sauvegarde cohérente : `./scripts/backup.sh <dossier>` (`VACUUM INTO`, un `cp` de la base pendant que l'app tourne peut être incohérent à cause du WAL).
+- **Cloudflare** est devant le site : il renvoie 403 au `User-Agent` par défaut de Python (`urllib`). Le client du Pi envoie toujours `eink-pi/1` ; tout nouveau client HTTP doit fixer le sien.
 - Les polices ne sont pas dans le dépôt : à copier à la main dans `admin/public/fonts/` **avant** le build (Vite les embarque dans `dist`).
 
 ## À faire
