@@ -1,0 +1,15 @@
+{
+  "name": "eink-server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch --env-file-if-exists=../.env src/index.js",
+    "start": "node --env-file-if-exists=../.env src/index.js"
+  },
+  "dependencies": {
+    "@fastify/multipart": "^9.0.0",
+    "@fastify/static": "^8.0.0",
+    "fastify": "^5.0.0",
+    "sharp": "^0.34.0"
+  }
+}

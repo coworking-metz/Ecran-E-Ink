@@ -1,0 +1,9 @@
+node_modules
+admin/dist
+server/data
+.env
+*.log
+# Notes locales (accès, chemins internes) et polices sous copyright
+CLAUDE.local.md
+admin/public/fonts/*
+!admin/public/fonts/README.md
