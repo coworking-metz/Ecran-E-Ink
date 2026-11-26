@@ -9,3 +9,5 @@ admin/public/fonts/*
 !admin/public/fonts/README.md
 .public-denylist
 docs-local/
+__pycache__/
+*.pyc
