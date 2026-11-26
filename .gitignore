@@ -7,3 +7,5 @@ server/data
 CLAUDE.local.md
 admin/public/fonts/*
 !admin/public/fonts/README.md
+.public-denylist
+docs-local/
