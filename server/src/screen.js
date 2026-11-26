@@ -62,30 +62,59 @@ export const calibrationStart = (seconds) => { calibrationUntil = Date.now() + s
 export const calibrationStop = () => { calibrationUntil = 0 }
 export const calibrationRemainingMs = (now = Date.now()) => Math.max(0, calibrationUntil - now)
 
+// Règles graduées depuis le bord RÉEL de la dalle (indépendantes des marges) : sur chaque côté, la graduation la plus
+// proche du bord qui reste visible donne le nombre de pixels cachés par le passe-partout, c'est-à-dire la marge à saisir.
+// Dessinées deux fois : en blanc (lisible sur les marges noires) et en noir, limitées à la zone utile (lisible sur le blanc).
+export const RULER_MAX = 80 // px depuis le bord
 export function calibrationSvg(screenW, screenH, m) {
   const c = canvasSize(screenW, screenH, m)
-  const ticks = []
-  for (let x = 0; x <= c.width; x += 10) {
-    const len = x % 100 === 0 ? 44 : x % 50 === 0 ? 28 : 14
-    ticks.push(`<path d="M${m.left + x} ${m.top}v${len}M${m.left + x} ${m.top + c.height}v${-len}" />`)
+  const cx = screenW / 2, cy = screenH / 2
+  const ticks = [], labels = []
+  for (let d = 0; d <= RULER_MAX; d += 5) {
+    const len = d % 10 === 0 ? 40 : 20
+    ticks.push(
+      `<path d="M${cx - 100} ${d}h${len}M${cx - 100} ${screenH - d}h${len}M${d} ${cy - 100}v${len}M${screenW - d} ${cy - 100}v${len}"/>`
+    )
+    if (d > 0 && d % 10 === 0) {
+      // Étiquettes décalées pour ne jamais se toucher : 2 colonnes sur les règles horizontales (graduations espacées de
+      // 10 px, chiffres de 13 px de haut), 4 rangées sur les règles verticales (chiffres plus larges que l'espacement).
+      const col = (d / 10) % 2, row = (d / 10) % 4
+      const tx = cx - 100 + 52 + col * 36
+      const ty = cy - 100 + 50 + row * 17
+      labels.push(
+        `<text x="${tx}" y="${d + 5}">${d}</text>`,
+        `<text x="${tx}" y="${screenH - d + 5}">${d}</text>`,
+        `<text x="${d}" y="${ty}" text-anchor="middle">${d}</text>`,
+        `<text x="${screenW - d}" y="${ty}" text-anchor="middle">${d}</text>`
+      )
+    }
   }
-  for (let y = 0; y <= c.height; y += 10) {
-    const len = y % 100 === 0 ? 44 : y % 50 === 0 ? 28 : 14
-    ticks.push(`<path d="M${m.left} ${m.top + y}h${len}M${m.left + c.width} ${m.top + y}h${-len}" />`)
-  }
-  const cx = m.left + c.width / 2, cy = m.top + c.height / 2
+  const corner = (x, y, dx, dy) => `M${x + dx * 40} ${y}H${x}V${y + dy * 40}`
+  const corners = [corner(m.left, m.top, 1, 1), corner(screenW - m.right, m.top, -1, 1), corner(m.left, screenH - m.bottom, 1, -1), corner(screenW - m.right, screenH - m.bottom, -1, -1)]
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${screenW}" height="${screenH}" viewBox="0 0 ${screenW} ${screenH}">
+  <defs>
+    <clipPath id="inner"><rect x="${m.left}" y="${m.top}" width="${c.width}" height="${c.height}"/></clipPath>
+    <g id="rulers" stroke="currentColor" stroke-width="2" fill="currentColor" font-family="sans-serif" font-size="13" font-weight="bold">
+      ${ticks.join('\n      ')}
+      ${labels.join('\n      ')}
+    </g>
+  </defs>
   <rect width="${screenW}" height="${screenH}" fill="#000"/>
   <rect x="${m.left}" y="${m.top}" width="${c.width}" height="${c.height}" fill="#fff"/>
-  <g stroke="#000" stroke-width="2" fill="none">
-    <path d="M${m.left} ${m.top}L${m.left + c.width} ${m.top + c.height}M${m.left + c.width} ${m.top}L${m.left} ${m.top + c.height}" stroke="#888"/>
-    <path d="M${cx} ${m.top}V${m.top + c.height}M${m.left} ${cy}H${m.left + c.width}" stroke="#888"/>
-    ${ticks.join('\n    ')}
+  <path d="M${m.left} ${cy}H${screenW - m.right}M${cx} ${m.top}V${screenH - m.bottom}" stroke="#999" stroke-width="2" fill="none" clip-path="url(#inner)"/>
+  <path d="${corners.join('')}" stroke="#000" stroke-width="4" fill="none"/>
+  <use href="#rulers" color="#fff"/>
+  <use href="#rulers" color="#000" clip-path="url(#inner)"/>
+  <g font-family="sans-serif" font-weight="bold" font-size="30" fill="#000">
+    <text x="${cx}" y="150" text-anchor="middle">HAUT</text>
+    <text x="${cx}" y="${screenH - 130}" text-anchor="middle">BAS</text>
+    <text x="150" y="${cy - 60}" text-anchor="start">GAUCHE</text>
+    <text x="${screenW - 150}" y="${cy - 60}" text-anchor="end">DROITE</text>
   </g>
-  <rect x="${m.left + 3}" y="${m.top + 3}" width="${c.width - 6}" height="${c.height - 6}" fill="none" stroke="#000" stroke-width="6"/>
-  <rect x="${cx - 250}" y="${cy - 70}" width="500" height="140" fill="#fff" stroke="#000" stroke-width="3"/>
-  <text x="${cx}" y="${cy - 14}" font-family="sans-serif" font-size="40" font-weight="bold" text-anchor="middle" fill="#000">${c.width} × ${c.height}</text>
-  <text x="${cx}" y="${cy + 38}" font-family="sans-serif" font-size="26" text-anchor="middle" fill="#000">haut ${m.top} · droite ${m.right} · bas ${m.bottom} · gauche ${m.left}</text>
+  <rect x="${cx - 270}" y="${cy - 70}" width="540" height="140" fill="#fff" stroke="#000" stroke-width="3"/>
+  <text x="${cx}" y="${cy - 28}" font-family="sans-serif" font-size="26" font-weight="bold" text-anchor="middle" fill="#000">Lis le 1er chiffre visible sur chaque bord</text>
+  <text x="${cx}" y="${cy + 6}" font-family="sans-serif" font-size="22" text-anchor="middle" fill="#000">= la marge à saisir (px)</text>
+  <text x="${cx}" y="${cy + 44}" font-family="sans-serif" font-size="22" text-anchor="middle" fill="#000">réglé : haut ${m.top} · droite ${m.right} · bas ${m.bottom} · gauche ${m.left}  (${c.width} × ${c.height})</text>
 </svg>`
 }
 export const calibrationHash = (screenW, screenH, m) => sha1(calibrationSvg(screenW, screenH, m))

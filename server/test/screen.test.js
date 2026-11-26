@@ -2,7 +2,7 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import sharp from 'sharp'
-import { parseMargins, finalHash, isZero, canvasSize, calibrationSvg, ZERO_MARGINS } from '../src/screen.js'
+import { parseMargins, finalHash, isZero, canvasSize, calibrationSvg, calibrationImage, ZERO_MARGINS } from '../src/screen.js'
 import { startServer } from './harness.js'
 
 test('parseMargins : valeurs valides, complétées à partir des marges actuelles', () => {
@@ -33,6 +33,44 @@ test('mire : SVG valide, à la taille de l’écran, avec les cotes de la zone u
   const meta = await sharp(Buffer.from(svg)).metadata()
   assert.equal(meta.width, 1200)
   assert.equal(meta.height, 825)
+})
+
+test('mire : marges, graduations et libellés exactement où il faut (haut 10, droite 0, bas 15, gauche 10)', async () => {
+  const m = { top: 10, right: 0, bottom: 15, left: 10 }
+  const png = await calibrationImage(1200, 825, m)
+  const meta = await sharp(png).metadata()
+  assert.deepEqual([meta.width, meta.height, meta.channels], [1200, 825, 1])
+  const { data, info } = await sharp(png).raw().toBuffer({ resolveWithObject: true })
+  const px = (x, y) => data[(y * info.width + x) * info.channels]
+
+  // Marges noires et zone utile blanche, au pixel près (colonne x = 200 / ligne y = 200, hors règles et libellés).
+  assert.equal(px(200, 9), 0, 'haut : y = 9 noir')
+  assert.equal(px(200, 10), 255, 'haut : y = 10 blanc')
+  assert.equal(px(200, 809), 255, 'bas : y = 809 blanc')
+  assert.equal(px(200, 810), 0, 'bas : y = 810 noir')
+  assert.equal(px(9, 200), 0, 'gauche : x = 9 noir')
+  assert.equal(px(10, 200), 255, 'gauche : x = 10 blanc')
+  assert.equal(px(1199, 200), 255, 'droite (0) : le dernier pixel est blanc')
+
+  // Graduations mesurées depuis le bord RÉEL de la dalle, indépendantes des marges : la règle du haut est à x = 500..,
+  // graduation d = 20 à y = 20 (noire, dans la zone utile) ; d = 5 à y = 5 (blanche, dans la marge noire de 10 px).
+  assert.equal(px(510, 20), 0, 'graduation 20 du haut : noire sur blanc')
+  assert.equal(px(510, 5), 255, 'graduation 5 du haut : blanche sur la marge noire')
+  // Règle du bas : graduation d = 20 à y = 825 - 20 = 805 (zone utile, noire) ; d = 5 à y = 820 (marge de 15 : blanche).
+  assert.equal(px(510, 805), 0, 'graduation 20 du bas : noire')
+  assert.equal(px(510, 820), 255, 'graduation 5 du bas : blanche sur la marge noire')
+  // Règle de gauche : graduation d = 5 (x = 5, marge de 10 : blanche) ; d = 20 (x = 20, zone utile : noire).
+  assert.equal(px(5, 320), 255, 'graduation 5 de gauche : blanche sur la marge noire')
+  assert.equal(px(20, 320), 0, 'graduation 20 de gauche : noire sur blanc')
+})
+
+test('mire : les libellés HAUT / BAS / GAUCHE / DROITE sont du bon côté de l’écran', () => {
+  const svg = calibrationSvg(1200, 825, ZERO_MARGINS)
+  const at = (word) => { const m = new RegExp(`<text x="([\\d.]+)" y="([\\d.]+)"[^>]*>${word}</text>`).exec(svg); assert.ok(m, `libellé ${word} présent`); return { x: +m[1], y: +m[2] } }
+  assert.ok(at('HAUT').y < 825 / 2, 'HAUT dans la moitié haute')
+  assert.ok(at('BAS').y > 825 / 2, 'BAS dans la moitié basse')
+  assert.ok(at('GAUCHE').x < 1200 / 2, 'GAUCHE dans la moitié gauche')
+  assert.ok(at('DROITE').x > 1200 / 2, 'DROITE dans la moitié droite')
 })
 
 // ---------- API : image finale réellement composée ----------
