@@ -74,6 +74,7 @@ test('cookie de session : valide accepté, tout le reste refusé', async () => {
     'signature altérée': `${body}.${sig.slice(0, -2)}AA`,
     'contenu modifié, signature conservée': `${forged}.${sig}`,
     'signé avec un autre secret': session({}, 'b'.repeat(64)),
+    'ancienne session de 7 jours (politique plus large)': session({ exp: Date.now() / 1000 + 7 * 86400 }),
     'sans signature': body,
     'n’importe quoi': 'x.y',
   }

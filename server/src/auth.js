@@ -9,8 +9,9 @@ const SESSION_SECRET = process.env.SESSION_SECRET || ''
 // URL publique de l'admin (celle que le navigateur voit : Vite en dev, le serveur en prod).
 // redirect_uri = PUBLIC_URL + /api/auth/callback, à enregistrer côté WordPress.
 const PUBLIC_URL = (process.env.PUBLIC_URL || 'http://localhost:5173').replace(/\/$/, '')
-const ALLOWED_ROLES = (process.env.SSO_ALLOWED_ROLES || 'admin').split(',').map((s) => s.trim()).filter(Boolean)
-const SESSION_SECONDS = Number(process.env.SESSION_DAYS || 7) * 86400
+// Session courte : un administrateur rétrogradé sur WordPress perd l'accès au plus tard à l'expiration (le rôle n'est
+// relu qu'à la connexion).
+const SESSION_SECONDS = Number(process.env.SESSION_DAYS || 1) * 86400
 
 const REDIRECT_URI = `${PUBLIC_URL}/api/auth/callback`
 const SECURE = PUBLIC_URL.startsWith('https://')
@@ -49,16 +50,16 @@ const cookie = (name, value, { maxAge, path = '/' }) =>
 export const sessionUser = (req) => {
   if (!SSO_ENABLED) return null
   const p = unsign(parseCookies(req.headers.cookie).eink_session)
+  // Une session dont l'expiration dépasse la durée actuelle date d'une politique plus large (ex. 7 jours) : refusée,
+  // l'utilisateur se reconnecte et son rôle est relu.
+  if (p && p.exp - Date.now() / 1000 > SESSION_SECONDS + 5) return null
   return p ? { id: p.sub, name: p.name, email: p.email, roles: p.roles } : null
 }
 
-// Droit d'accès : un des rôles autorisés (par défaut « admin », calculé par le WordPress du coworking),
-// ou administrateur WordPress si « admin » est autorisé.
-const isAllowed = (me) => {
-  const roles = [...(me.roles ?? [])]
-  if ((me.user_roles ?? []).includes('administrator')) roles.push('admin')
-  return roles.some((r) => ALLOWED_ROLES.includes(r))
-}
+// Droit d'accès : administrateurs WordPress uniquement, d'après le rôle WordPress `administrator` renvoyé par
+// /oauth/me (`user_roles`). On ne se fie pas au champ `roles` calculé par le site (« admin », « coworker »…) :
+// il est propre à ce site et pourrait changer de sens. Comparaison stricte, sans extension possible par configuration.
+const isAllowed = (me) => Array.isArray(me.user_roles) && me.user_roles.includes('administrator')
 
 const safeEq = (a, b) => {
   const x = Buffer.from(String(a)), y = Buffer.from(String(b))
